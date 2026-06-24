@@ -1,0 +1,12 @@
+# downloaded FCC/SOTA data and generated outputs
+fccdata/
+testout/
+fixtures/
+*.zip
+summitslist.csv
+*_rf_sources.csv
+*_rf_sources.geojson
+*_summit_summary.csv
+sample_*.csv
+__pycache__/
+*.pyc
