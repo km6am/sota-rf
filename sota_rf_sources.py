@@ -50,6 +50,18 @@ URLS = {
         "https://data.fcc.gov/download/pub/uls/complete/l_LMcomm.zip",
         "https://data.fcc.gov/download/pub/uls/complete/l_LMpriv.zip",
     ],
+    # FCC CDBS media/broadcast public files (FM/TV/AM). NOTE: CDBS was frozen
+    # ~2024-01 when broadcast filing moved to LMS; it is a static snapshot, good
+    # for the long-lived high-ERP incumbents (full-power FM/TV) that dominate
+    # receiver-overload risk, stale for recent low-power additions. The live
+    # successor (LMS) is bot-blocked against scripted download. See CLAUDE.md.
+    "broadcast": {
+        "facility":    "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/facility.zip",
+        "fm_eng_data": "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/fm_eng_data.zip",
+        "tv_eng_data": "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/tv_eng_data.zip",
+        "am_eng_data": "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/am_eng_data.zip",
+        "am_ant_sys":  "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/am_ant_sys.zip",
+    },
 }
 
 # US SOTA association code prefixes (SummitCode starts with one of these + "/").
@@ -74,6 +86,31 @@ LO = dict(usi=1, call=4, loc_type=6, loc_num=8,
           lon_deg=23, lon_min=24, lon_sec=25, lon_dir=26,
           tower_reg=37, loc_name=42)
 FR = dict(usi=1, call=4, loc_num=6, freq_mhz=10, power_output=15, power_erp=16)
+
+# FCC CDBS broadcast (media) records. Verified against the live files + DDL:
+# real files carry a few extra trailing columns vs the published DDL, but FCC
+# appends new fields at the end so these indices hold. (See CLAUDE.md.)
+FAC = dict(comm_city=0, comm_state=1, callsign=5, channel=6, freq=9,
+           service=10, facility_id=14, status=16)
+# FM: effective_erp is almost always blank -- horiz_erp/vert_erp carry the ERP.
+FM_ENG = dict(facility_id=20, eng_rec=19, asrn=9, station_class=49, channel=62,
+              erp_eff=16, erp_h=29, erp_v=52, haat=23, rcamsl=47,
+              lat_deg=30, lat_dir=31, lat_min=32, lat_sec=33,
+              lon_deg=34, lon_dir=35, lon_min=36, lon_sec=37)
+# TV: effective_erp is the reliable field (power_output_vis_kw as fallback).
+TV_ENG = dict(facility_id=21, eng_rec=19, asrn=7, channel=66,
+              erp_eff=15, erp_vis=44, haat=24, rcamsl=56,
+              lat_deg=28, lat_dir=29, lat_min=30, lat_sec=31,
+              lon_deg=32, lon_dir=33, lon_min=34, lon_sec=35)
+# AM antenna system holds coords + power but no facility_id; join via am_eng_data
+# (application_id -> facility_id).
+AM_ANT = dict(app_id=2, eng_rec=27, power=22,
+              lat_deg=12, lat_dir=13, lat_min=14, lat_sec=15,
+              lon_deg=16, lon_dir=17, lon_min=18, lon_sec=19)
+AM_ENG = dict(app_id=1, facility_id=4)
+
+# CDBS facility statuses we treat as "on the air" (vs void/cancelled/CP-only).
+BROADCAST_LIVE_STATUS = {"LICEN"}
 
 
 # --------------------------------------------------------------------------- #
@@ -129,6 +166,38 @@ def to_float(x):
         return float(x)
     except (TypeError, ValueError):
         return np.nan
+
+
+def nz(x):
+    """nan/None -> 0.0. For optional minute/second fields: a blank minute must
+    not poison the whole coordinate. (Note `np.nan or 0` is `np.nan`, since NaN
+    is truthy in Python -- so `(m or 0)` does NOT guard against it.)"""
+    return 0.0 if (x is None or (isinstance(x, float) and np.isnan(x))) else x
+
+
+def dms_to_dec(deg, mn, sec, direction, neg="S"):
+    """Degrees/minutes/seconds (+ hemisphere char) -> signed decimal degrees.
+    Returns nan if the degree field is missing."""
+    d = to_float(deg)
+    if np.isnan(d):
+        return np.nan
+    val = abs(d) + nz(to_float(mn)) / 60.0 + nz(to_float(sec)) / 3600.0
+    return -val if str(direction).strip().upper() == neg else val
+
+
+def tv_channel_center_mhz(ch):
+    """US over-the-air TV channel number -> band-center frequency (MHz). Lets a
+    TV source be compared on frequency to nearby receivers. nan if out of range."""
+    c = to_float(ch)
+    if np.isnan(c):
+        return np.nan
+    c = int(c)
+    if 2 <= c <= 4:     lo = 54 + (c - 2) * 6      # VHF-lo ch 2-4
+    elif 5 <= c <= 6:   lo = 76 + (c - 5) * 6      # VHF-lo ch 5-6
+    elif 7 <= c <= 13:  lo = 174 + (c - 7) * 6     # VHF-hi ch 7-13
+    elif 14 <= c <= 36: lo = 470 + (c - 14) * 6    # UHF ch 14-36 (post-repack)
+    else:               return np.nan
+    return lo + 3.0     # 6 MHz wide; report the center
 
 
 # --------------------------------------------------------------------------- #
@@ -244,8 +313,8 @@ def load_uls(zip_paths):
                            to_float(g(r, LO["lon_sec"])))
             if np.isnan(ld) or np.isnan(od):
                 continue
-            lat = (ld + (lm or 0)/60 + (ls_ or 0)/3600) * (-1 if g(r, LO["lat_dir"]) == "S" else 1)
-            lon = (od + (om or 0)/60 + (os_ or 0)/3600) * (-1 if g(r, LO["lon_dir"]) == "W" else 1)
+            lat = (ld + nz(lm)/60 + nz(ls_)/3600) * (-1 if g(r, LO["lat_dir"]) == "S" else 1)
+            lon = (od + nz(om)/60 + nz(os_)/3600) * (-1 if g(r, LO["lon_dir"]) == "W" else 1)
             locs.append((usi, lat, lon, g(r, LO["loc_name"]).strip(),
                          g(r, LO["tower_reg"]).strip()))
 
@@ -272,6 +341,152 @@ def load_uls(zip_paths):
 
 
 # --------------------------------------------------------------------------- #
+# Broadcast FM/TV/AM (FCC CDBS media) -- the high-ERP sources
+# --------------------------------------------------------------------------- #
+def _broadcast_row(db, fid, finfo, lat, lon, erp_kw, freq_mhz, rcamsl, asrn, services):
+    """Assemble one unified RF-source row from a broadcast facility + engineering
+    record. ERP comes in kW; the unified table is watts (broadcast dwarfs the
+    land-mobile sources, which is exactly the point)."""
+    cs = (finfo.get("callsign") or "").strip() or fid
+    city, state = finfo.get("city", ""), finfo.get("state", "")
+    where = ", ".join(p for p in (city, state) if p)
+    erp = to_float(erp_kw)
+    fq = to_float(freq_mhz)
+    return dict(
+        source_db=db,
+        ref=cs,
+        owner=(f"{cs} ({where})" if where else cs),
+        lat=lat, lon=lon,
+        struct_type="",
+        height_agl_m=np.nan,                       # HAAT != AGL; leave blank
+        height_amsl_m=to_float(rcamsl),
+        freqs_mhz=("" if np.isnan(fq) else f"{fq:g}"),
+        max_power_w=(np.nan if np.isnan(erp) else erp * 1000.0),
+        services=services,
+        link_reg=str(asrn).strip(),                # ASR registration -> physical tower
+        loc_name=where,
+    )
+
+
+def load_broadcast(facility_zip, fm_zip, tv_zip, am_eng_zip, am_ant_zip):
+    # facility table: identity + service + on-air status, keyed by facility_id
+    fac = {}
+    for r in read_dat_from_zip(facility_zip, "facility"):
+        fid = g(r, FAC["facility_id"]).strip()
+        if not fid:
+            continue
+        fac[fid] = dict(
+            callsign=g(r, FAC["callsign"]).strip(),
+            service=g(r, FAC["service"]).strip(),
+            status=g(r, FAC["status"]).strip(),
+            freq=g(r, FAC["freq"]).strip(),
+            channel=g(r, FAC["channel"]).strip(),
+            city=g(r, FAC["comm_city"]).strip(),
+            state=g(r, FAC["comm_state"]).strip(),
+        )
+
+    def live(fid):
+        f = fac.get(fid)
+        return f if (f and f["status"] in BROADCAST_LIVE_STATUS) else None
+
+    # Keep one current ("C") engineering record per facility -- the highest-ERP
+    # one (the main antenna, not an auxiliary).
+    fm_best, tv_best, am_best = {}, {}, {}
+
+    # ---- FM (incl. translators FX / LP FL) ----
+    for r in read_dat_from_zip(fm_zip, "fm_eng_data"):
+        if g(r, FM_ENG["eng_rec"]).strip() != "C":
+            continue
+        fid = g(r, FM_ENG["facility_id"]).strip()
+        finfo = live(fid)
+        if not finfo:
+            continue
+        lat = dms_to_dec(g(r, FM_ENG["lat_deg"]), g(r, FM_ENG["lat_min"]),
+                         g(r, FM_ENG["lat_sec"]), g(r, FM_ENG["lat_dir"]), "S")
+        lon = dms_to_dec(g(r, FM_ENG["lon_deg"]), g(r, FM_ENG["lon_min"]),
+                         g(r, FM_ENG["lon_sec"]), g(r, FM_ENG["lon_dir"]), "W")
+        if np.isnan(lat) or np.isnan(lon):
+            continue
+        erps = [to_float(g(r, FM_ENG[k])) for k in ("erp_h", "erp_v", "erp_eff")]
+        erp = max([x for x in erps if not np.isnan(x)], default=np.nan)
+        cls = g(r, FM_ENG["station_class"]).strip()
+        svc = finfo["service"] or "FM"
+        services = svc + (f" class {cls}" if cls else "")
+        row = _broadcast_row("FM", fid, finfo, lat, lon, erp,
+                             to_float(finfo["freq"]),               # MHz already
+                             g(r, FM_ENG["rcamsl"]), g(r, FM_ENG["asrn"]), services)
+        key = -1.0 if np.isnan(erp) else erp
+        if fid not in fm_best or key > fm_best[fid][0]:
+            fm_best[fid] = (key, row)
+
+    # ---- TV (full power TV/DT, low power LD/TX, etc.) ----
+    for r in read_dat_from_zip(tv_zip, "tv_eng_data"):
+        if g(r, TV_ENG["eng_rec"]).strip() != "C":
+            continue
+        fid = g(r, TV_ENG["facility_id"]).strip()
+        finfo = live(fid)
+        if not finfo:
+            continue
+        lat = dms_to_dec(g(r, TV_ENG["lat_deg"]), g(r, TV_ENG["lat_min"]),
+                         g(r, TV_ENG["lat_sec"]), g(r, TV_ENG["lat_dir"]), "S")
+        lon = dms_to_dec(g(r, TV_ENG["lon_deg"]), g(r, TV_ENG["lon_min"]),
+                         g(r, TV_ENG["lon_sec"]), g(r, TV_ENG["lon_dir"]), "W")
+        if np.isnan(lat) or np.isnan(lon):
+            continue
+        erp = to_float(g(r, TV_ENG["erp_eff"]))
+        if np.isnan(erp):
+            erp = to_float(g(r, TV_ENG["erp_vis"]))
+        ch = g(r, TV_ENG["channel"]).strip() or finfo["channel"]
+        svc = finfo["service"] or "TV"
+        services = svc + (f" ch{ch}" if ch else "")
+        row = _broadcast_row("TV", fid, finfo, lat, lon, erp,
+                             tv_channel_center_mhz(ch),
+                             g(r, TV_ENG["rcamsl"]), g(r, TV_ENG["asrn"]), services)
+        key = -1.0 if np.isnan(erp) else erp
+        if fid not in tv_best or key > tv_best[fid][0]:
+            tv_best[fid] = (key, row)
+
+    # ---- AM (coords+power live in am_ant_sys, keyed by application_id) ----
+    am_app2fac = {}
+    for r in read_dat_from_zip(am_eng_zip, "am_eng_data"):
+        aid = g(r, AM_ENG["app_id"]).strip()
+        fid = g(r, AM_ENG["facility_id"]).strip()
+        if aid and fid:
+            am_app2fac[aid] = fid
+    for r in read_dat_from_zip(am_ant_zip, "am_ant_sys"):
+        if g(r, AM_ANT["eng_rec"]).strip() != "C":
+            continue
+        fid = am_app2fac.get(g(r, AM_ANT["app_id"]).strip())
+        if not fid:
+            continue
+        finfo = live(fid)
+        if not finfo:
+            continue
+        lat = dms_to_dec(g(r, AM_ANT["lat_deg"]), g(r, AM_ANT["lat_min"]),
+                         g(r, AM_ANT["lat_sec"]), g(r, AM_ANT["lat_dir"]), "S")
+        lon = dms_to_dec(g(r, AM_ANT["lon_deg"]), g(r, AM_ANT["lon_min"]),
+                         g(r, AM_ANT["lon_sec"]), g(r, AM_ANT["lon_dir"]), "W")
+        if np.isnan(lat) or np.isnan(lon):
+            continue
+        power = to_float(g(r, AM_ANT["power"]))                      # kW
+        khz = to_float(finfo["freq"])                               # AM facility freq is kHz
+        freq = np.nan if np.isnan(khz) else khz / 1000.0           # -> MHz
+        row = _broadcast_row("AM", fid, finfo, lat, lon, power, freq,
+                             np.nan, "", finfo["service"] or "AM")
+        key = -1.0 if np.isnan(power) else power
+        if fid not in am_best or key > am_best[fid][0]:
+            am_best[fid] = (key, row)
+
+    rows = ([v[1] for v in fm_best.values()]
+            + [v[1] for v in tv_best.values()]
+            + [v[1] for v in am_best.values()])
+    df = pd.DataFrame(rows)
+    log(f"  broadcast facilities (licensed): {len(df)}  "
+        f"(FM {len(fm_best)} + TV {len(tv_best)} + AM {len(am_best)})")
+    return df
+
+
+# --------------------------------------------------------------------------- #
 # Merge + spatial join
 # --------------------------------------------------------------------------- #
 COLS = ["source_db", "ref", "owner", "lat", "lon", "struct_type",
@@ -279,8 +494,8 @@ COLS = ["source_db", "ref", "owner", "lat", "lon", "struct_type",
         "services", "link_reg"]
 
 
-def merge_sources(asr_df, uls_df):
-    frames = [d for d in (asr_df, uls_df) if d is not None and len(d)]
+def merge_sources(*dfs):
+    frames = [d for d in dfs if d is not None and len(d)]
     if not frames:
         return pd.DataFrame(columns=COLS)
     out = pd.concat(frames, ignore_index=True)
@@ -294,6 +509,17 @@ def merge_sources(asr_df, uls_df):
 def spatial_join(summits, rf, radius_m):
     from sklearn.neighbors import BallTree
     if len(summits) == 0 or len(rf) == 0:
+        return pd.DataFrame()
+    # Drop sources with missing or out-of-range coordinates before indexing:
+    # live FCC data carries a few blank/garbage lat/lon (e.g. lat > 90), which
+    # would crash BallTree or yield nonsense distances.
+    n_before = len(rf)
+    valid = (np.isfinite(rf["lat"]) & np.isfinite(rf["lon"])
+             & rf["lat"].between(-90, 90) & rf["lon"].between(-180, 180))
+    rf = rf[valid].reset_index(drop=True)
+    if len(rf) < n_before:
+        log(f"  dropped {n_before - len(rf)} source(s) with bad coordinates")
+    if len(rf) == 0:
         return pd.DataFrame()
     R = 6_371_000.0
     rf_rad = np.radians(rf[["lat", "lon"]].to_numpy())
@@ -329,13 +555,15 @@ def summarise(joined, summits):
         rf_source_count=("rf_ref", "size"),
         asr_count=("rf_source_db", lambda s: (s == "ASR").sum()),
         uls_count=("rf_source_db", lambda s: (s == "ULS").sum()),
+        bcast_count=("rf_source_db", lambda s: s.isin(("FM", "TV", "AM")).sum()),
         nearest_m=("distance_m", "min"),
         nearest_owner=("rf_owner", "first"),
         max_struct_height_m=("rf_height_agl_m", "max"),
+        max_power_w=("rf_max_power_w", "max"),
     ).reset_index()
     meta = summits[["summit", "name", "region", "lat", "lon", "alt_m", "points"]]
     return meta.merge(out, on="summit", how="left").fillna(
-        {"rf_source_count": 0, "asr_count": 0, "uls_count": 0})
+        {"rf_source_count": 0, "asr_count": 0, "uls_count": 0, "bcast_count": 0})
 
 
 def to_geojson(joined, path):
@@ -381,6 +609,12 @@ def main():
                     help="repeatable; pre-downloaded l_LM*.zip path(s)")
     ap.add_argument("--no-uls", action="store_true",
                     help="ASR structures only (skip the frequency/power layer)")
+    ap.add_argument("--no-broadcast", action="store_true",
+                    help="skip the FM/TV/AM broadcast layer (CDBS media files)")
+    ap.add_argument("--broadcast-dir",
+                    help="dir holding pre-downloaded CDBS media zips "
+                         "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
+                         "am_eng_data.zip, am_ant_sys.zip); skips their download")
     args = ap.parse_args()
 
     os.makedirs(args.data_dir, exist_ok=True)
@@ -396,17 +630,17 @@ def main():
             return dest if os.path.exists(dest) else None
         return download(url, dest)
 
-    log("[1/4] summits")
+    log("[1/5] summits")
     sfile = fetch(URLS["summits"], "summitslist.csv", args.summits_file)
     summits = load_summits(sfile, prefixes)
 
-    log("[2/4] ASR structures")
+    log("[2/5] ASR structures")
     afile = fetch(URLS["asr"], "r_tower.zip", args.asr_file)
     asr = load_asr(afile)
 
     uls = None
     if not args.no_uls:
-        log("[3/4] ULS land-mobile (freq + power)")
+        log("[3/5] ULS land-mobile (freq + power)")
         ufiles = args.uls_file or [fetch(u, os.path.basename(u), None)
                                    for u in URLS["uls"]]
         ufiles = [u for u in ufiles if u and os.path.exists(u)]
@@ -415,8 +649,26 @@ def main():
         else:
             log("  (no ULS files available; structures only)")
 
-    log("[4/4] merge + spatial join")
-    rf = merge_sources(asr, uls)
+    bcast = None
+    if not args.no_broadcast:
+        log("[4/5] broadcast FM/TV/AM (CDBS media)")
+        if args.broadcast_dir:
+            bf = {k: os.path.join(args.broadcast_dir, os.path.basename(u))
+                  for k, u in URLS["broadcast"].items()}
+        else:
+            bf = {k: fetch(u, os.path.basename(u), None)
+                  for k, u in URLS["broadcast"].items()}
+        if all(bf[k] and os.path.exists(bf[k]) for k in URLS["broadcast"]):
+            bcast = load_broadcast(bf["facility"], bf["fm_eng_data"],
+                                   bf["tv_eng_data"], bf["am_eng_data"],
+                                   bf["am_ant_sys"])
+        else:
+            missing = [k for k in URLS["broadcast"]
+                       if not (bf[k] and os.path.exists(bf[k]))]
+            log(f"  (broadcast files missing: {missing}; skipping FM/TV/AM)")
+
+    log("[5/5] merge + spatial join")
+    rf = merge_sources(asr, uls, bcast)
     joined = spatial_join(summits, rf, args.radius)
     summary = summarise(joined, summits)
 
@@ -430,14 +682,18 @@ def main():
     log("\n=== done ===")
     log(f"summits processed : {len(summits)}")
     log(f"RF sources in DB   : {len(rf)}  (ASR {len(asr) if asr is not None else 0}"
-        f" + ULS {0 if uls is None else len(uls)})")
+        f" + ULS {0 if uls is None else len(uls)}"
+        f" + broadcast {0 if bcast is None else len(bcast)})")
     log(f"summit<->source hits within {args.radius:g} m : {len(joined)}")
     if len(summary):
         hot = summary.sort_values('rf_source_count', ascending=False).head(8)
         log("hottest summits:")
         for _, r in hot.iterrows():
+            extra = ""
+            if "bcast_count" in r and r.get("bcast_count", 0):
+                extra = f"  (incl. {int(r['bcast_count'])} broadcast)"
             log(f"  {r['summit']:<12} {str(r['name'])[:26]:<26} "
-                f"sources={int(r['rf_source_count'])}")
+                f"sources={int(r['rf_source_count'])}{extra}")
     log(f"\nwrote:\n  {p_join}\n  {p_sum}\n  {p_geo}")
 
 
