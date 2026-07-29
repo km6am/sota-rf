@@ -50,15 +50,21 @@ def fr(usi, call, freq, p_out, p_erp, loc="1"):
 
 with zipfile.ZipFile("fixtures/l_LMcomm.zip","w") as z:
     z.writestr("HD.dat","\n".join([hd("5001","WPAA123"), hd("5002","WQQQ999"),
-        hd("5003","WCANCEL","C")])+"\n")
+        hd("5003","WCANCEL","C"),
+        hd("5004","WMWX000",svc="CF")])+"\n")            # microwave (common-carrier fixed)
     z.writestr("EN.dat","\n".join([en_uls("5001","WPAA123","CONTRA COSTA COUNTY"),
-        en_uls("5002","WQQQ999","DIABLO TWO WAY RADIO")])+"\n")
+        en_uls("5002","WQQQ999","DIABLO TWO WAY RADIO"),
+        en_uls("5004","WMWX000","DIABLO BACKHAUL LLC")])+"\n")
     z.writestr("LO.dat","\n".join([
         lo("5001","WPAA123",37.8835,-121.9120,"MT DIABLO PEAK",tower_reg="1234567"),
         lo("5002","WQQQ999",37.8700,-121.9300,"DIABLO LOWER SHOULDER"),
-        lo("5003","WCANCEL",37.8810,-121.9150,"GHOST SITE")])+"\n")
+        lo("5003","WCANCEL",37.8810,-121.9150,"GHOST SITE"),
+        lo("5004","WMWX000",37.8825,-121.9130,"DIABLO MW TERMINAL")])+"\n")
+    # microwave FR carries the freq but NO power (blank power_output/power_erp),
+    # exactly like the live l_micro.zip -- must parse to a valid freq + NaN power.
     z.writestr("FR.dat","\n".join([fr("5001","WPAA123",155.745,110,250),
-        fr("5001","WPAA123",154.205,110,250), fr("5002","WQQQ999",462.55,40,75)])+"\n")
+        fr("5001","WPAA123",154.205,110,250), fr("5002","WQQQ999",462.55,40,75),
+        fr("5004","WMWX000",6034.15,"","")])+"\n")
 
 # --------------------------------------------------------------------------- #
 # Broadcast FM/TV/AM (FCC CDBS media files). Column counts match the live files
@@ -134,3 +140,17 @@ assert abs(am["max_power_w"] - 5000) < 1, am["max_power_w"]
 print("broadcast self-check OK:", len(bc), "rows  "
       f"(FM {fm['max_power_w']:.0f}W, TV {tv['max_power_w']:.0f}W @ {tv['freqs_mhz']}MHz, "
       f"AM {am['freqs_mhz']}MHz)")
+
+# ---- Microwave drop-in: l_micro shares the HD/EN/LO/FR layout, but its FR
+# records carry no power. A microwave license must parse to a valid freq with
+# NaN power (not 0, not a crash), and cancelled licenses stay excluded. ----
+import numpy as _np
+uls = m.load_uls(["fixtures/l_LMcomm.zip"])
+assert not (uls["ref"] == "5003").any(), "cancelled ULS license 5003 not excluded"
+mwrows = uls[uls["ref"] == "5004"]
+assert len(mwrows) == 1, f"microwave license missing (got {len(mwrows)} rows)"
+mw = mwrows.iloc[0]
+assert mw["services"] == "CF", f"microwave service code wrong: {mw['services']!r}"
+assert abs(float(mw["freqs_mhz"]) - 6034.15) < 1e-3, f"microwave freq wrong: {mw['freqs_mhz']}"
+assert _np.isnan(mw["max_power_w"]), f"microwave power should be NaN, got {mw['max_power_w']}"
+print(f"microwave self-check OK: 6 GHz CF path parsed, power=NaN, freq={mw['freqs_mhz']}MHz")

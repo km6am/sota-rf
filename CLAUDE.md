@@ -5,8 +5,10 @@ Catalogs the fixed RF sources on/near SOTA summits by spatially joining the SOTA
 summit list against three public FCC datasets, **merged**:
 - **FCC ASR** (`r_tower.zip`) → registered antenna structures (towers/masts):
   location, owner, height, structure type.
-- **FCC ULS Land Mobile** (`l_LMcomm.zip`, `l_LMpriv.zip`) → licensed
-  transmitters: location, owner, **frequency + power (ERP)**.
+- **FCC ULS Land Mobile + Microwave** (`l_LMcomm.zip`, `l_LMpriv.zip`,
+  `l_micro.zip`) → licensed transmitters: location, owner, **frequency + power
+  (ERP)**. Microwave shares the ULS record layout (drop-in) and adds fixed
+  point-to-point paths (backhaul/STL) — freq + location but no power.
 - **FCC CDBS media** (`facility.zip`, `fm_eng_data.zip`, `tv_eng_data.zip`,
   `am_eng_data.zip`, `am_ant_sys.zip`) → **broadcast FM/TV/AM** stations:
   location, callsign, **frequency/channel + ERP (the high-power offenders)**.
@@ -42,7 +44,11 @@ Layer toggles: `--no-uls` (ASR only), `--no-broadcast` (skip FM/TV/AM).
 - `load_asr()` — parse ASR CO/RA/EN records; keep active towers (constructed,
   not dismantled) that have surface coordinates.
 - `load_uls()` — parse ULS HD/EN/LO/FR; keep active licenses; aggregate
-  frequencies and max power per location.
+  frequencies and max power per location. Generic over its list of zips, so
+  land-mobile (`l_LMcomm`/`l_LMpriv`) and microwave (`l_micro`) all flow through
+  it; microwave FR records carry a freq but **blank power** (→ NaN `max_power_w`,
+  which is correct — a 6/11/18 GHz backhaul path is a freq+location fact), and
+  its service codes (CF/MG/MW/TI/TS…) distinguish it in the `services` column.
 - `load_broadcast()` — parse CDBS `facility` (identity/service/status) + the
   per-service engineering tables; keep current (`eng_record_type='C'`) records
   for licensed (`fac_status='LICEN'`) facilities, one (highest-ERP) per facility.
@@ -86,7 +92,18 @@ the end), but the indices above are verified against the real files.
   a lat=93 garbage record) before `BallTree`, which otherwise crashes on NaN.
 - Downloading: FCC `urllib` download hits its 120 s read timeout on the big zips;
   fetch them with `curl -C -` into `fccdata/` and run with `--no-download`.
-- Env: conda env `sota-rf` (python 3.12, pandas/numpy/scikit-learn).
+- Env: conda env `sota-rf` (python 3.12, pandas/numpy/scikit-learn). Interpreter:
+  `~/miniconda3/envs/sota-rf/bin/python` (the shell `conda activate` isn't wired
+  up in non-interactive subshells — call that path directly).
+- **Microwave layer added (roadmap #2) — drop-in, self-tested, run live.**
+  `l_micro.zip` (226 MB) added to `URLS["uls"]`; same HD/EN/LO/FR layout so
+  `load_uls()` was unchanged. W6 live: ULS locations 619,804 → **1,043,082**
+  (+423k microwave paths), total sources 802,704 → **1,225,982**, W6 hits
+  7,466 → **15,580**. Sanity-checked OK: microwave-band (>900 MHz) hits carry
+  6/11/18/19 GHz backhaul freqs, service codes CF/MG/MW/TI/TS, real licensees
+  (T-Mobile MW LLC backhaul, broadcast STLs), and power is blank 95.7% of the
+  time (correct — microwave FR has no power field). Prominent relay peaks
+  (Woodson, Box Springs, San Miguel, Verdugo) rose up the hot-summit list.
 - **Broadcast FM/TV/AM layer added (roadmap #3) — built, self-tested, run live.**
   30,695 licensed CDBS facilities (FM 19,407 + TV 6,903 + AM 4,385) folded into
   the W6 join → 489 broadcast summit-hits. Sanity-checked OK: full-power TV
@@ -103,8 +120,9 @@ the end), but the indices above are verified against the real files.
 
 ## Roadmap / next tasks
 1. ~~**Run W6 live** and sanity-check.~~ **DONE** — see Current status.
-2. **Add microwave** — `l_micro.zip` uses the *same* HD/EN/LO/FR layout, so it's
-   a drop-in: add its URL to `URLS["uls"]`.
+2. ~~**Add microwave**~~ **DONE** — `l_micro.zip` added to `URLS["uls"]`; it
+   shares the ULS HD/EN/LO/FR layout so `load_uls()` handled it unchanged.
+   Verified live on W6 (see Current status) and self-tested (blank-power → NaN).
 3. ~~**Add broadcast FM/TV/AM**~~ **DONE** via `load_broadcast()` (CDBS media).
    Future: enrich with licensee/owner name (needs an `app_party`/parties join;
    currently `owner` = callsign + community), and optionally an LMS loader for

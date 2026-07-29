@@ -46,9 +46,14 @@ csv.field_size_limit(min(sys.maxsize, 2_147_483_647))
 URLS = {
     "summits": "https://www.sotadata.org.uk/summitslist.csv",
     "asr":     "https://data.fcc.gov/download/pub/uls/complete/r_tower.zip",
+    # Land-mobile + microwave. All share the ULS HD/EN/LO/FR public-format
+    # record layout, so load_uls() handles them uniformly; l_micro adds fixed
+    # point-to-point microwave paths (STL/backhaul), whose distinct service
+    # codes (CF/MG/etc.) surface in the `services` column.
     "uls": [
         "https://data.fcc.gov/download/pub/uls/complete/l_LMcomm.zip",
         "https://data.fcc.gov/download/pub/uls/complete/l_LMpriv.zip",
+        "https://data.fcc.gov/download/pub/uls/complete/l_micro.zip",
     ],
     # FCC CDBS media/broadcast public files (FM/TV/AM). NOTE: CDBS was frozen
     # ~2024-01 when broadcast filing moved to LMS; it is a static snapshot, good
@@ -336,7 +341,7 @@ def load_uls(zip_paths):
             loc_name=name,
         ))
     df = pd.DataFrame(rows)
-    log(f"  ULS land-mobile locations: {len(df)}")
+    log(f"  ULS locations (land-mobile + microwave): {len(df)}")
     return df
 
 
@@ -640,7 +645,7 @@ def main():
 
     uls = None
     if not args.no_uls:
-        log("[3/5] ULS land-mobile (freq + power)")
+        log("[3/5] ULS land-mobile + microwave (freq + power)")
         ufiles = args.uls_file or [fetch(u, os.path.basename(u), None)
                                    for u in URLS["uls"]]
         ufiles = [u for u in ufiles if u and os.path.exists(u)]
