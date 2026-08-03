@@ -699,7 +699,10 @@ def to_caltopo_summits(summary, joined, path):
         at_risk = [f"{b} {bands[b]}" for b, _ in HAM_BANDS if bands[b] in ("HIGH", "MODERATE")]
         detail = " · ".join(f"{b} {bands[b]}" for b, _ in HAM_BANDS)
         srcs = f'{d["n"]} ({d["n_b"]} bcast · {d["n_uls"]} licensed · {d["n_asr"]} struct)'
-        desc = (f'Overload risk: {d["overall"]}\n'
+        # Compact on-map label = the SOTA code (long names garble where summits
+        # cluster); the full name leads the click popup.
+        desc = (f'{s["name"]}\n'
+                f'Overload risk: {d["overall"]}\n'
                 f'Total ERP: {human_w(d["total"])}\n'
                 f'Bands at risk: {" · ".join(at_risk) if at_risk else "none"}\n'
                 f'Strongest: {d["strongest"]}\n'
@@ -708,7 +711,8 @@ def to_caltopo_summits(summary, joined, path):
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [round(s["lon"], 6), round(s["lat"], 6)]},
             "properties": {
-                "title": f'{s["name"]} ({code})',
+                "title": code,
+                "name": s["name"],
                 "description": desc,
                 "risk": d["overall"],
                 "total_erp": human_w(d["total"]),
@@ -716,9 +720,10 @@ def to_caltopo_summits(summary, joined, path):
                 "band_detail": detail,
                 "strongest": d["strongest"],
                 "sources": srcs,
+                # CalTopo renders "point" as a small solid dot: clickable (so the
+                # popup works) and compact (unlike the big hollow "triangle").
                 "marker-color": RISK_COLOR[d["overall"]],
-                "marker-symbol": "triangle",
-                "marker-size": "medium",
+                "marker-symbol": "point",
             },
         })
     with open(path, "w") as f:
@@ -729,7 +734,6 @@ def to_caltopo_summits(summary, joined, path):
 def to_caltopo_sources(joined, path):
     """One point per distinct source, coloured by ERP (grey = no ERP figure),
     symbol by class. Directly importable into CalTopo."""
-    sym = {"ASR": "triangle", "ULS": "circle", "FM": "star", "TV": "star", "AM": "star"}
     feats, seen = [], set()
     for _, r in joined.iterrows():
         key = (r["rf_source_db"], r["rf_ref"], round(r["rf_lat"], 6), round(r["rf_lon"], 6))
@@ -752,8 +756,7 @@ def to_caltopo_sources(joined, path):
                 "services": r["rf_services"],
                 "distance_m": r["distance_m"],
                 "marker-color": power_to_hex(p),
-                "marker-symbol": sym.get(r["rf_source_db"], "circle"),
-                "marker-size": "small",
+                "marker-symbol": "point",
             },
         })
     with open(path, "w") as f:
