@@ -92,6 +92,13 @@ LO = dict(usi=1, call=4, loc_type=6, loc_num=8,
           tower_reg=37, loc_name=42)
 FR = dict(usi=1, call=4, loc_num=6, freq_mhz=10, power_output=15, power_erp=16)
 
+# Sanity cap: any ULS ERP above this is data-entry garbage. Legit land-mobile
+# ERP tops out in the low kW and microwave carries no power at all; the only
+# legitimate megawatts (full-power TV) come from CDBS, never ULS. Observed
+# garbage: 5 MW / 11.7 MW "STL" values. Readings above the cap are dropped
+# (→ NaN power) rather than trusted, so they can't dominate a summit's total.
+ULS_POWER_CAP_W = 1_000_000.0
+
 # FCC CDBS broadcast (media) records. Verified against the live files + DDL:
 # real files carry a few extra trailing columns vs the published DDL, but FCC
 # appends new fields at the end so these indices hold. (See CLAUDE.md.)
@@ -306,7 +313,7 @@ def load_uls(zip_paths):
                 freqs[usi].append(fq)
             for k in ("power_erp", "power_output"):
                 p = to_float(g(r, FR[k]))
-                if not np.isnan(p):
+                if not np.isnan(p) and p <= ULS_POWER_CAP_W:   # drop garbage outliers
                     powers[usi] = max(powers[usi], p)
         for r in read_dat_from_zip(zp, "LO"):
             usi = g(r, LO["usi"])
@@ -613,6 +620,15 @@ RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
 RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
               "LOW": "#6da536", "CLEAR": "#4d7a20"}
 
+# Transmit-band breakdown for the popup: non-overlapping MHz bins + short label,
+# so a summit's ERP reads as e.g. "88-108 MHz FM 425 kW". Microwave carries no
+# ERP in ULS, so it never contributes power here.
+RF_BANDS = [("AM", 0.5, 1.71), ("HF", 1.71, 50), ("VHF-lo", 50, 88),
+            ("FM", 88, 108), ("air", 108, 137), ("VHF", 137, 174),
+            ("VHF-TV", 174, 225), ("UHF", 400, 470), ("UHF-TV", 470, 700),
+            ("700/800/900", 700, 960), ("microwave", 960, 60000)]
+RF_BAND_RANGE = {label: (lo, hi) for label, lo, hi in RF_BANDS}
+
 
 def _risk_tier(score):
     if score >= 20:  return "HIGH"
@@ -653,75 +669,66 @@ def _summit_analysis(joined):
     per-ham-band risk tier, overall tier, total ERP, source counts, strongest."""
     info = {}
     for summit, g in joined.groupby("summit"):
-        recv = {b: 0.0 for b, _ in HAM_BANDS}
+        recv = {b: 0.0 for b, _ in HAM_BANDS}   # ham-band overload score (drives colour)
+        bandp = {}                              # transmit-band ERP total (drives popup)
         for _, r in g.iterrows():
             p = r["rf_max_power_w"]
             if pd.isna(p):
                 continue
             contrib = p / (max(r["distance_m"], 10.0) ** 2)
+            fs = []
             for tok in str(r["rf_freqs_mhz"]).split(";"):
                 try:
                     f = float(tok)
                 except ValueError:
                     continue
-                if np.isnan(f):
-                    continue
+                if not np.isnan(f):
+                    fs.append(f)
+            for f in fs:
                 for b, fc in HAM_BANDS:
                     if 0.5 * fc <= f <= 2 * fc:
                         recv[b] += contrib
-        bands = {b: _risk_tier(recv[b]) for b, _ in HAM_BANDS}
-        overall = max((bands[b] for b, _ in HAM_BANDS), key=RISK_ORDER.index)
+            hit = {label for f in fs for label, lo, hi in RF_BANDS if lo <= f < hi}
+            for label in (hit or {"unknown freq"}):   # powered but unbinnable (e.g. TV ch>36)
+                bandp[label] = bandp.get(label, 0.0) + p
+        overall = max((_risk_tier(recv[b]) for b, _ in HAM_BANDS), key=RISK_ORDER.index)
         pw = g["rf_max_power_w"]
         total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
-        if pw.notna().any():
-            top = g.loc[pw.idxmax()]
-            strongest = f'{top["rf_owner"]} {human_w(top["rf_max_power_w"])} @ {int(top["distance_m"])} m'
-        else:
-            strongest = "—"
-        db = g["rf_source_db"]
-        info[summit] = dict(
-            bands=bands, scores=recv, overall=overall, total=total, n=len(g),
-            n_b=int(db.isin(("FM", "TV", "AM")).sum()),
-            n_uls=int((db == "ULS").sum()), n_asr=int((db == "ASR").sum()),
-            strongest=strongest)
+        info[summit] = dict(overall=overall, total=total, bandp=bandp, n=len(g))
     return info
 
 
 def to_caltopo_summits(summary, joined, path):
-    """One point per summit that has ≥1 source, coloured by overload risk, with
-    the band analysis in the popup. Directly importable into CalTopo."""
+    """One point per summit that has ≥1 source, coloured by overload risk. The
+    popup is terse: total ERP, then the ERP broken down by transmit band
+    (biggest first). Directly importable into CalTopo."""
     info = _summit_analysis(joined)
     smeta = summary.set_index("summit")
     feats = []
     for code, d in info.items():
         s = smeta.loc[code]
-        bands = d["bands"]
-        at_risk = [f"{b} {bands[b]}" for b, _ in HAM_BANDS if bands[b] in ("HIGH", "MODERATE")]
-        detail = " · ".join(f"{b} {bands[b]}" for b, _ in HAM_BANDS)
-        srcs = f'{d["n"]} ({d["n_b"]} bcast · {d["n_uls"]} licensed · {d["n_asr"]} struct)'
-        # Compact on-map label = the SOTA code (long names garble where summits
-        # cluster); the full name leads the click popup.
+        # RF-band breakdown, biggest ERP first: "88-108 MHz FM  425 kW"
+        band_lines = []
+        for label, w in sorted(d["bandp"].items(), key=lambda kv: -kv[1]):
+            rng = RF_BAND_RANGE.get(label)
+            if not rng:
+                head = label
+            elif rng[1] >= 6000:               # microwave catch-all: show ">lo"
+                head = f">{rng[0]:g} MHz {label}"
+            else:
+                head = f"{rng[0]:g}-{rng[1]:g} MHz {label}"
+            band_lines.append(f"{head}  {human_w(w)}")
         desc = (f'{s["name"]}\n'
-                f'Overload risk: {d["overall"]}\n'
-                f'Total ERP: {human_w(d["total"])}\n'
-                f'Bands at risk: {" · ".join(at_risk) if at_risk else "none"}\n'
-                f'Strongest: {d["strongest"]}\n'
-                f'Sources: {srcs}')
+                f'Total ERP  {human_w(d["total"])}\n'
+                + "\n".join(band_lines))
         feats.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [round(s["lon"], 6), round(s["lat"], 6)]},
             "properties": {
+                # Minimal props → a clean CalTopo tab. Label = compact SOTA code;
+                # the full name + band breakdown lives in the popup (comments).
                 "title": code,
-                "name": s["name"],
                 "description": desc,
-                "risk": d["overall"],
-                "total_erp": human_w(d["total"]),
-                "bands_at_risk": " · ".join(at_risk) if at_risk else "none",
-                "band_detail": detail,
-                "strongest": d["strongest"],
-                "sources": srcs,
-                # CalTopo renders "point" as a small solid dot: clickable (so the
-                # popup works) and compact (unlike the big hollow "triangle").
                 "marker-color": RISK_COLOR[d["overall"]],
                 "marker-symbol": "point",
             },

@@ -64,6 +64,7 @@ with zipfile.ZipFile("fixtures/l_LMcomm.zip","w") as z:
     # exactly like the live l_micro.zip -- must parse to a valid freq + NaN power.
     z.writestr("FR.dat","\n".join([fr("5001","WPAA123",155.745,110,250),
         fr("5001","WPAA123",154.205,110,250), fr("5002","WQQQ999",462.55,40,75),
+        fr("5001","WPAA123",155.010,9999999,9999999),   # garbage ERP -> must be capped out
         fr("5004","WMWX000",6034.15,"","")])+"\n")
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +155,12 @@ assert mw["services"] == "CF", f"microwave service code wrong: {mw['services']!r
 assert abs(float(mw["freqs_mhz"]) - 6034.15) < 1e-3, f"microwave freq wrong: {mw['freqs_mhz']}"
 assert _np.isnan(mw["max_power_w"]), f"microwave power should be NaN, got {mw['max_power_w']}"
 print(f"microwave self-check OK: 6 GHz CF path parsed, power=NaN, freq={mw['freqs_mhz']}MHz")
+
+# ---- ULS power sanity-cap: a garbage megawatt reading is dropped, the legit
+# low-power reading on the same license survives (not NaN, not the garbage). ----
+lm = uls[uls["ref"] == "5001"].iloc[0]
+assert lm["max_power_w"] == 250, f"ULS cap wrong: expected 250 W, got {lm['max_power_w']}"
+print(f"ULS power-cap self-check OK: garbage 10 MW dropped, legit 250 W kept")
 
 # ---- CalTopo scoring helpers (pure functions feeding the summit-risk layer) ----
 assert m.human_w(1_000_000) == "1.00 MW", m.human_w(1_000_000)

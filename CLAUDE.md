@@ -118,10 +118,14 @@ the end), but the indices above are verified against the real files.
   kHz→MHz, and the LICEN/`'C'` filtering. Source choice: **CDBS** (scriptable,
   frozen ~2024-01) over **LMS** (current but Akamai-bot-blocked against scripted
   download); good for the long-lived high-ERP incumbents, stale for new low-power.
-- Pre-existing **ULS data-quality outlier** (not broadcast): some ULS `power_erp`
-  values are garbage (e.g. NBCUniversal 9.24 GHz STL listed at 5,000,000 W at
-  Mt Lukens). A future sanity-cap on ULS power would clean the `max_power_w`
-  summary column. Note: the CalTopo **summit-risk** score is robust to these —
+- **ULS power sanity-cap added (roadmap #6) — DONE.** Some ULS `power_erp`
+  values are garbage (NBCUniversal 9.24 GHz STL at 5 MW, an 11.7 MW record at Oat
+  Mtn). The W6 distribution is decisive: legit ULS ERP tops out at **3,500 W**,
+  then a huge gap to the 4 bogus megawatt values; broadcast megawatts come from
+  CDBS, never ULS. `load_uls()` now drops any ULS reading > `ULS_POWER_CAP_W`
+  (1 MW) → NaN, so Mt Lukens' total falls from a garbage 5.24 MW to a real
+  237 kW. Self-tested (garbage 10 MW dropped, legit 250 W kept).
+- Note: the CalTopo **summit-risk** score was already robust to these —
   Oat Mtn's bogus 11.7 MW reads MODERATE, not HIGH, because the garbage STL's
   frequency doesn't fall in any ham-band window (the score is Σ ERP/d² within a
   ±octave of each ham band, so distance + band-relevance dilute the outlier).
@@ -131,10 +135,19 @@ the end), but the indices above are verified against the real files.
   LOW); the HIGH shortlist is the known-hot roster (San Miguel, Lukens, Cahto,
   San Bruno, Fremont Pk, Shasta Bally, Mt Allison). Risk = per-ham-band
   Σ ERP/d² within a ±octave window, tiers HIGH≥20 / MOD≥3 / LOW≥0.3 / CLEAR
-  (heuristic, calibrated to Bay Area masts). CalTopo constraint discovered:
-  popups are **plain-text only** (no HTML/img/clickable links, per CalTopo's
-  help forum), so the rich report-card mockup can't live *in* CalTopo — it's a
-  browser companion; the map layer carries risk colour + text popup instead.
+  (heuristic, calibrated to Bay Area masts) — drives the **marker colour** only.
+  CalTopo constraints discovered the hard way: (1) popups are **plain-text only**
+  (no HTML/img/clickable links, per CalTopo's help forum), so the rich
+  report-card mockup can't live *in* CalTopo — it's a browser companion; (2)
+  `marker-symbol` must be from CalTopo's honoured set — my first cut used
+  `"triangle"` and it rendered as giant hollow shapes that weren't clickable
+  (no popup). Fixed by matching `sota-wfs`'s verified styling (loaders.py):
+  `marker-symbol: "point"` (small solid dot), `marker-color: "#hex"`, no
+  `marker-size`. **Popup content** (per user feedback): terse — full name, total
+  ERP, then the ERP broken down by **transmit band** (`88-108 MHz FM 425 kW`,
+  biggest first, via `RF_BANDS`), *not* by ham band; on-map label is the compact
+  SOTA code. Powered-but-unbinnable ERP (TV ch>36 with blank freq) shows as an
+  `unknown freq` line.
 
 ## Roadmap / next tasks
 1. ~~**Run W6 live** and sanity-check.~~ **DONE** — see Current status.
@@ -148,7 +161,8 @@ the end), but the indices above are verified against the real files.
 4. **Full `--us` run** once layers are in.
 5. Optional: collapse ULS-on-ASR matches (`rf_link_reg`) into single structure
    rows that list their frequencies inline, for a cleaner per-structure view.
-6. Optional: sanity-cap absurd ULS `power_erp` outliers (see Current status).
+6. ~~Sanity-cap absurd ULS `power_erp` outliers.~~ **DONE** — `load_uls()` drops
+   ULS ERP > `ULS_POWER_CAP_W` (1 MW); see Current status.
 7. ~~**CalTopo layers**~~ **DONE (first pass)** — direct-import simplestyle
    GeoJSON (`to_caltopo_summits` / `to_caltopo_sources`). Next: (a) serve them
    live via a WFS endpoint for CalTopo (the `jeffkowalski/sota-wfs` Flask
