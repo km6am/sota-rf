@@ -177,14 +177,20 @@ the end), but the indices above are verified against the real files.
 6. ~~Sanity-cap absurd ULS `power_erp` outliers.~~ **DONE** — `load_uls()` drops
    ULS ERP > `ULS_POWER_CAP_W` (1 MW); see Current status.
 7. ~~**CalTopo layers**~~ **DONE (first pass)** — direct-import simplestyle
-   GeoJSON (`to_caltopo_summits` / `to_caltopo_sources`). Next: (a) serve them
-   live via a WFS endpoint for CalTopo (the `jeffkowalski/sota-wfs` Flask
-   framework — a `Layer` registry entry + a GeoJSON loader per layer; explored,
-   clone in scratch), so they auto-update and bbox-filter instead of manual
-   import; (b) a standalone **RF report-card** web page (the spectrum + emitter
-   scatter + scrollable table — see the Artifact mockup) as the browser
-   companion CalTopo can't host; (c) tune risk thresholds / octave window with
-   more ground truth; (d) dedupe multi-frequency emitters in the scatter.
+   GeoJSON (`to_caltopo_summits` / `to_caltopo_sources`).
+   - (a) ~~serve live via WFS + scheduled refresh~~ **DEPLOY PACKAGE BUILT** (not
+     run here — targets the `jeffkowalski/sota-wfs` box). Mirrors that repo's
+     fetch→loader→registry→systemd pattern: `fetch/fetch_rf_sources.py`
+     (conditional GET on the ULS/ASR completes via `curl -z`/Last-Modified,
+     CDBS fetched-once/frozen, rebuild, atomic swap into `data/rf_summits.geojson`),
+     `systemd/fetch-rf-sources.{service,timer}` (monthly `oneshot`), and
+     `DEPLOY_SOTA_WFS.md` (the `rf_geojson_loader` + `RF_Sources` `Layer` to add,
+     deps, install). Download logic smoke-tested against live FCC.
+   - (b) a standalone **RF report-card** web page (spectrum + emitter scatter +
+     scrollable table — see the Artifact mockup) as the browser companion CalTopo
+     can't host; (c) tune risk thresholds / octave window with ground truth;
+     (d) true per-record delta updates (FCC daily transaction files → a
+     persistent datastore) if the monthly full pull is too heavy.
 
 ## Known gaps / gotchas
 - ASR only requires registration above ~200 ft AGL (or near airports) — short

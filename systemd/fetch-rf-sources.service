@@ -1,0 +1,14 @@
+[Unit]
+Description=Rebuild SOTA RF-source CalTopo layers from FCC data
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Dropbox/workspace/sota-wfs
+ExecStart=%h/Dropbox/workspace/sota-wfs/.venv/bin/python fetch/fetch_rf_sources.py
+# National rebuild pulls ~700 MB (only when FCC's copy is newer) and runs the
+# full spatial join, so give it room and run it gently.
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle
+# Optional: SOTA_RF_ASSOCIATION=W6 (default US), NREL_API_KEY, etc.
+EnvironmentFile=-%h/Dropbox/workspace/sota-wfs/.env
