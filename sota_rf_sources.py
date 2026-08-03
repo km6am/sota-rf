@@ -596,6 +596,172 @@ def to_geojson(joined, path):
 
 
 # --------------------------------------------------------------------------- #
+# CalTopo layers: overload-risk summit points + power-coloured source points.
+# CalTopo renders GeoJSON points and honours the simplestyle-spec properties
+# (marker-color / marker-symbol / marker-size) and shows the rest as a plain-
+# text popup (no HTML/img/links). So the analysis is compressed into text
+# fields + a `description` blob, and severity is encoded as marker colour.
+# --------------------------------------------------------------------------- #
+
+# Ham bands an activator operates (MHz band-centre). "Risk" to each is a
+# front-end-overload proxy: Σ ERP_watts / dist_m² over powered sources whose
+# frequency lands within a ±octave window (0.5×–2× the centre). Thresholds are
+# heuristic, calibrated so the known-hot Bay Area masts read HIGH.
+HAM_BANDS = [("40m", 7.15), ("20m", 14.2), ("6m", 52),
+             ("2m", 146), ("70cm", 435), ("23cm", 1270)]
+RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
+RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
+              "LOW": "#6da536", "CLEAR": "#4d7a20"}
+
+
+def _risk_tier(score):
+    if score >= 20:  return "HIGH"
+    if score >= 3:   return "MODERATE"
+    if score >= 0.3: return "LOW"
+    return "CLEAR"
+
+
+def human_w(w):
+    """Watts -> compact human string; NaN/None -> em dash."""
+    if w is None or (isinstance(w, float) and np.isnan(w)):
+        return "—"
+    if w >= 1e6: return f"{w/1e6:.2f} MW"
+    if w >= 1e3: return f"{w/1e3:.0f} kW"
+    return f"{w:.0f} W"
+
+
+# thermal ramp (cool -> hot), matching the report-card mockup
+_RAMP = [(0.0, (74, 139, 153)), (0.42, (198, 121, 27)),
+         (0.72, (188, 80, 40)), (1.0, (204, 74, 48))]
+
+
+def power_to_hex(w):
+    """Map an ERP (watts) to a heat colour; no-ERP sources get a neutral grey."""
+    if w is None or (isinstance(w, float) and np.isnan(w)):
+        return "#8a97a3"
+    t = min(1.0, max(0.0, (np.log10(max(w, 1.0)) - 2) / 4))   # 100 W..1 MW -> 0..1
+    for i in range(1, len(_RAMP)):
+        if t <= _RAMP[i][0]:
+            (a, ca), (b, cb) = _RAMP[i-1], _RAMP[i]
+            u = (t - a) / ((b - a) or 1)
+            return "#%02x%02x%02x" % tuple(round(ca[j] + (cb[j]-ca[j])*u) for j in range(3))
+    return "#%02x%02x%02x" % _RAMP[-1][1]
+
+
+def _summit_analysis(joined):
+    """Per-summit overload analysis keyed by summit code:
+    per-ham-band risk tier, overall tier, total ERP, source counts, strongest."""
+    info = {}
+    for summit, g in joined.groupby("summit"):
+        recv = {b: 0.0 for b, _ in HAM_BANDS}
+        for _, r in g.iterrows():
+            p = r["rf_max_power_w"]
+            if pd.isna(p):
+                continue
+            contrib = p / (max(r["distance_m"], 10.0) ** 2)
+            for tok in str(r["rf_freqs_mhz"]).split(";"):
+                try:
+                    f = float(tok)
+                except ValueError:
+                    continue
+                if np.isnan(f):
+                    continue
+                for b, fc in HAM_BANDS:
+                    if 0.5 * fc <= f <= 2 * fc:
+                        recv[b] += contrib
+        bands = {b: _risk_tier(recv[b]) for b, _ in HAM_BANDS}
+        overall = max((bands[b] for b, _ in HAM_BANDS), key=RISK_ORDER.index)
+        pw = g["rf_max_power_w"]
+        total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
+        if pw.notna().any():
+            top = g.loc[pw.idxmax()]
+            strongest = f'{top["rf_owner"]} {human_w(top["rf_max_power_w"])} @ {int(top["distance_m"])} m'
+        else:
+            strongest = "—"
+        db = g["rf_source_db"]
+        info[summit] = dict(
+            bands=bands, scores=recv, overall=overall, total=total, n=len(g),
+            n_b=int(db.isin(("FM", "TV", "AM")).sum()),
+            n_uls=int((db == "ULS").sum()), n_asr=int((db == "ASR").sum()),
+            strongest=strongest)
+    return info
+
+
+def to_caltopo_summits(summary, joined, path):
+    """One point per summit that has ≥1 source, coloured by overload risk, with
+    the band analysis in the popup. Directly importable into CalTopo."""
+    info = _summit_analysis(joined)
+    smeta = summary.set_index("summit")
+    feats = []
+    for code, d in info.items():
+        s = smeta.loc[code]
+        bands = d["bands"]
+        at_risk = [f"{b} {bands[b]}" for b, _ in HAM_BANDS if bands[b] in ("HIGH", "MODERATE")]
+        detail = " · ".join(f"{b} {bands[b]}" for b, _ in HAM_BANDS)
+        srcs = f'{d["n"]} ({d["n_b"]} bcast · {d["n_uls"]} licensed · {d["n_asr"]} struct)'
+        desc = (f'Overload risk: {d["overall"]}\n'
+                f'Total ERP: {human_w(d["total"])}\n'
+                f'Bands at risk: {" · ".join(at_risk) if at_risk else "none"}\n'
+                f'Strongest: {d["strongest"]}\n'
+                f'Sources: {srcs}')
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [round(s["lon"], 6), round(s["lat"], 6)]},
+            "properties": {
+                "title": f'{s["name"]} ({code})',
+                "description": desc,
+                "risk": d["overall"],
+                "total_erp": human_w(d["total"]),
+                "bands_at_risk": " · ".join(at_risk) if at_risk else "none",
+                "band_detail": detail,
+                "strongest": d["strongest"],
+                "sources": srcs,
+                "marker-color": RISK_COLOR[d["overall"]],
+                "marker-symbol": "triangle",
+                "marker-size": "medium",
+            },
+        })
+    with open(path, "w") as f:
+        json.dump({"type": "FeatureCollection", "features": feats}, f)
+    return len(feats)
+
+
+def to_caltopo_sources(joined, path):
+    """One point per distinct source, coloured by ERP (grey = no ERP figure),
+    symbol by class. Directly importable into CalTopo."""
+    sym = {"ASR": "triangle", "ULS": "circle", "FM": "star", "TV": "star", "AM": "star"}
+    feats, seen = [], set()
+    for _, r in joined.iterrows():
+        key = (r["rf_source_db"], r["rf_ref"], round(r["rf_lat"], 6), round(r["rf_lon"], 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        p = None if pd.isna(r["rf_max_power_w"]) else r["rf_max_power_w"]
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [round(r["rf_lon"], 6), round(r["rf_lat"], 6)]},
+            "properties": {
+                "title": f'{r["rf_owner"] or r["rf_ref"]} — {human_w(p)}',
+                "description": (f'{r["rf_source_db"]}  {r["rf_ref"]}\n'
+                               f'ERP: {human_w(p)}\nFreqs: {r["rf_freqs_mhz"] or "—"} MHz\n'
+                               f'Services: {r["rf_services"] or "—"}\n'
+                               f'{round(r["distance_m"])} m from {r["summit"]}'),
+                "db": r["rf_source_db"],
+                "erp": human_w(p),
+                "freqs_mhz": r["rf_freqs_mhz"],
+                "services": r["rf_services"],
+                "distance_m": r["distance_m"],
+                "marker-color": power_to_hex(p),
+                "marker-symbol": sym.get(r["rf_source_db"], "circle"),
+                "marker-size": "small",
+            },
+        })
+    with open(path, "w") as f:
+        json.dump({"type": "FeatureCollection", "features": feats}, f)
+    return len(feats)
+
+
+# --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -680,9 +846,13 @@ def main():
     p_join = os.path.join(args.out_dir, f"{tag}_rf_sources.csv")
     p_sum = os.path.join(args.out_dir, f"{tag}_summit_summary.csv")
     p_geo = os.path.join(args.out_dir, f"{tag}_rf_sources.geojson")
+    p_ct_sum = os.path.join(args.out_dir, f"{tag}_summits_caltopo.geojson")
+    p_ct_src = os.path.join(args.out_dir, f"{tag}_sources_caltopo.geojson")
     joined.to_csv(p_join, index=False)
     summary.to_csv(p_sum, index=False)
     n_geo = to_geojson(joined, p_geo) if len(joined) else 0
+    n_ct_sum = to_caltopo_summits(summary, joined, p_ct_sum) if len(joined) else 0
+    n_ct_src = to_caltopo_sources(joined, p_ct_src) if len(joined) else 0
 
     log("\n=== done ===")
     log(f"summits processed : {len(summits)}")
@@ -700,6 +870,8 @@ def main():
             log(f"  {r['summit']:<12} {str(r['name'])[:26]:<26} "
                 f"sources={int(r['rf_source_count'])}{extra}")
     log(f"\nwrote:\n  {p_join}\n  {p_sum}\n  {p_geo}")
+    log(f"  {p_ct_sum}  ({n_ct_sum} summit-risk points, CalTopo)")
+    log(f"  {p_ct_src}  ({n_ct_src} source points, CalTopo)")
 
 
 if __name__ == "__main__":

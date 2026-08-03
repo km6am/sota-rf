@@ -24,8 +24,13 @@ python3 sota_rf_sources.py --association W6 --radius 1000   # proof-of-concept
 python3 sota_rf_sources.py --us --radius 1000               # all US (eventual goal)
 ```
 Outputs (prefixed by association or `US`): `*_rf_sources.csv` (one row per
-summit×source), `*_summit_summary.csv` (per-summit counts + nearest), and
-`*_rf_sources.geojson` (for QGIS / geojson.io).
+summit×source), `*_summit_summary.csv` (per-summit counts + nearest),
+`*_rf_sources.geojson` (for QGIS / geojson.io), and two **CalTopo** layers
+(simplestyle GeoJSON, direct-import): `*_summits_caltopo.geojson` (one pin per
+summit with sources, `marker-color` by overload risk, popup = per-band risk
+analysis as plain text) and `*_sources_caltopo.geojson` (one pin per source,
+`marker-color` by ERP heat). CalTopo popups are plain-text only (no HTML/img/
+links), so the analysis is compressed into text fields + a `description` blob.
 
 Self-test without downloading hundreds of MB (writes fixtures, then asserts the
 loaders + broadcast kW→W / channel→freq / status filtering are correct):
@@ -116,7 +121,20 @@ the end), but the indices above are verified against the real files.
 - Pre-existing **ULS data-quality outlier** (not broadcast): some ULS `power_erp`
   values are garbage (e.g. NBCUniversal 9.24 GHz STL listed at 5,000,000 W at
   Mt Lukens). A future sanity-cap on ULS power would clean the `max_power_w`
-  summary column.
+  summary column. Note: the CalTopo **summit-risk** score is robust to these —
+  Oat Mtn's bogus 11.7 MW reads MODERATE, not HIGH, because the garbage STL's
+  frequency doesn't fall in any ham-band window (the score is Σ ERP/d² within a
+  ±octave of each ham band, so distance + band-relevance dilute the outlier).
+- **CalTopo layers added — built, self-tested, verified on real W6 join.**
+  `to_caltopo_summits()` / `to_caltopo_sources()` emit direct-import simplestyle
+  GeoJSON. Summit layer: 576 W6 summits (317 CLEAR · 101 MODERATE · 83 HIGH · 75
+  LOW); the HIGH shortlist is the known-hot roster (San Miguel, Lukens, Cahto,
+  San Bruno, Fremont Pk, Shasta Bally, Mt Allison). Risk = per-ham-band
+  Σ ERP/d² within a ±octave window, tiers HIGH≥20 / MOD≥3 / LOW≥0.3 / CLEAR
+  (heuristic, calibrated to Bay Area masts). CalTopo constraint discovered:
+  popups are **plain-text only** (no HTML/img/clickable links, per CalTopo's
+  help forum), so the rich report-card mockup can't live *in* CalTopo — it's a
+  browser companion; the map layer carries risk colour + text popup instead.
 
 ## Roadmap / next tasks
 1. ~~**Run W6 live** and sanity-check.~~ **DONE** — see Current status.
@@ -131,6 +149,15 @@ the end), but the indices above are verified against the real files.
 5. Optional: collapse ULS-on-ASR matches (`rf_link_reg`) into single structure
    rows that list their frequencies inline, for a cleaner per-structure view.
 6. Optional: sanity-cap absurd ULS `power_erp` outliers (see Current status).
+7. ~~**CalTopo layers**~~ **DONE (first pass)** — direct-import simplestyle
+   GeoJSON (`to_caltopo_summits` / `to_caltopo_sources`). Next: (a) serve them
+   live via a WFS endpoint for CalTopo (the `jeffkowalski/sota-wfs` Flask
+   framework — a `Layer` registry entry + a GeoJSON loader per layer; explored,
+   clone in scratch), so they auto-update and bbox-filter instead of manual
+   import; (b) a standalone **RF report-card** web page (the spectrum + emitter
+   scatter + scrollable table — see the Artifact mockup) as the browser
+   companion CalTopo can't host; (c) tune risk thresholds / octave window with
+   more ground truth; (d) dedupe multi-frequency emitters in the scatter.
 
 ## Known gaps / gotchas
 - ASR only requires registration above ~200 ft AGL (or near airports) — short

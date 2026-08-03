@@ -154,3 +154,16 @@ assert mw["services"] == "CF", f"microwave service code wrong: {mw['services']!r
 assert abs(float(mw["freqs_mhz"]) - 6034.15) < 1e-3, f"microwave freq wrong: {mw['freqs_mhz']}"
 assert _np.isnan(mw["max_power_w"]), f"microwave power should be NaN, got {mw['max_power_w']}"
 print(f"microwave self-check OK: 6 GHz CF path parsed, power=NaN, freq={mw['freqs_mhz']}MHz")
+
+# ---- CalTopo scoring helpers (pure functions feeding the summit-risk layer) ----
+assert m.human_w(1_000_000) == "1.00 MW", m.human_w(1_000_000)
+assert m.human_w(45_000) == "45 kW", m.human_w(45_000)
+assert m.human_w(250) == "250 W", m.human_w(250)
+assert m.human_w(None) == "—" and m.human_w(float("nan")) == "—"
+# risk tiers calibrated to San Bruno's real scores (70cm 37.6, 2m 11.5, 23cm 1.5, clear 0)
+assert m._risk_tier(37.6) == "HIGH" and m._risk_tier(11.5) == "MODERATE"
+assert m._risk_tier(1.5) == "LOW" and m._risk_tier(0.0) == "CLEAR"
+# power->colour: no ERP is neutral grey; more power is redder (higher R channel)
+assert m.power_to_hex(None) == "#8a97a3", m.power_to_hex(None)
+assert m.power_to_hex(1_000_000)[1:3] > m.power_to_hex(200)[1:3], "1 MW should be redder than 200 W"
+print("CalTopo scoring self-check OK: human_w / risk tiers / power heat-colour")

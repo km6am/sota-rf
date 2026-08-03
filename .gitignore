@@ -7,6 +7,7 @@ summitslist.csv
 *_rf_sources.csv
 *_rf_sources.geojson
 *_summit_summary.csv
+*_caltopo.geojson
 sample_*.csv
 __pycache__/
 *.pyc
