@@ -518,7 +518,15 @@ def merge_sources(*dfs):
     return out[COLS + (["loc_name"] if "loc_name" in out.columns else [])]
 
 
-def spatial_join(summits, rf, radius_m):
+# Field-strength inclusion. Beyond the base radius, a source is kept only if its
+# received-power proxy ERP/d² clears this floor (W/m²). Anchor: 0.01 = as loud at
+# the summit as a 10 kW transmitter at 1 km. Consequence: a 1 MW mast reaches
+# ~10 km (Sutro Tower's 1 MW TVs at ~1.9 km clear it easily), a 100 kW to ~3 km,
+# while a few-hundred-watt land-mobile is governed by the base radius alone.
+FIELD_THRESHOLD_W_M2 = 0.01
+
+
+def spatial_join(summits, rf, radius_m, field_threshold=FIELD_THRESHOLD_W_M2):
     from sklearn.neighbors import BallTree
     if len(summits) == 0 or len(rf) == 0:
         return pd.DataFrame()
@@ -534,26 +542,40 @@ def spatial_join(summits, rf, radius_m):
     if len(rf) == 0:
         return pd.DataFrame()
     R = 6_371_000.0
+    # Outer query radius: the farthest any source could still clear the field
+    # floor is set by the highest plausible ERP (the 1 MW ULS/broadcast cap).
+    # The base radius still wins for near-field low-power sources.
+    max_radius = min(50_000.0, max(radius_m, (ULS_POWER_CAP_W / field_threshold) ** 0.5))
     rf_rad = np.radians(rf[["lat", "lon"]].to_numpy())
     tree = BallTree(rf_rad, metric="haversine")
     su_rad = np.radians(summits[["lat", "lon"]].to_numpy())
-    ind, dist = tree.query_radius(su_rad, r=radius_m / R,
+    ind, dist = tree.query_radius(su_rad, r=max_radius / R,
                                   return_distance=True, sort_results=True)
-    recs = []
+    powers = rf["max_power_w"].to_numpy(dtype=float)
+    recs, n_far = [], 0
     s = summits.reset_index(drop=True)
     for i, (idxs, ds) in enumerate(zip(ind, dist)):
+        if len(idxs) == 0:
+            continue
+        d = ds * R
+        p = powers[idxs]
+        near = d <= radius_m
+        far = (~near) & np.isfinite(p) & (p / (d * d) >= field_threshold)
+        n_far += int(far.sum())
         srow = s.iloc[i]
-        for j, d in zip(idxs, ds):
-            rfr = rf.iloc[j]
+        for k in np.flatnonzero(near | far):
+            rfr = rf.iloc[idxs[k]]
             rec = dict(
                 summit=srow["summit"], summit_name=srow["name"],
                 region=srow["region"], summit_lat=srow["lat"],
                 summit_lon=srow["lon"], summit_alt_m=srow["alt_m"],
-                distance_m=round(d * R, 1),
+                distance_m=round(float(d[k]), 1),
             )
             for c in COLS:
                 rec[f"rf_{c}"] = rfr[c]
             recs.append(rec)
+    log(f"  field model: base {radius_m:g} m + {n_far} far high-ERP hits "
+        f"(ERP/d² ≥ {field_threshold:g} W/m², out to {max_radius:.0f} m)")
     return pd.DataFrame(recs)
 
 
@@ -667,14 +689,15 @@ CLUSTER_RATIO = 1.10   # sources within 10% of each other share a popup bin
 
 
 def _cluster_freqs(items):
-    """items: list of (freq, src_id, power) sorted by freq. Single-linkage
+    """items: list of (freq, src_id, power, dist) sorted by freq. Single-linkage
     cluster where the next freq is within CLUSTER_RATIO of the previous, so a
     tight land-mobile group is called out at its real footprint rather than
-    lumped into the whole service band. Yields (lo, hi, power) per cluster, power
-    summed once per source (a licence on several channels counts once)."""
+    lumped into the whole service band. Yields (lo, hi, power, nearest_dist) per
+    cluster; power summed once per source (a licence on several channels counts
+    once), nearest_dist = closest source in the cluster."""
     def emit(cl):
-        by_src = {sid: p for _, sid, p in cl}   # dedupe power per source
-        return (cl[0][0], cl[-1][0], sum(by_src.values()))
+        by_src = {sid: p for _, sid, p, _ in cl}          # dedupe power per source
+        return (cl[0][0], cl[-1][0], sum(by_src.values()), min(d for *_, d in cl))
     cluster, prev = [], None
     for it in items:
         if prev is not None and it[0] > prev * CLUSTER_RATIO:
@@ -725,14 +748,14 @@ def power_to_hex(w):
     return "#%02x%02x%02x" % _RAMP[-1][1]
 
 
-def _summit_analysis(joined):
+def _summit_analysis(joined, base_radius=1000.0):
     """Per-summit overload analysis keyed by summit code:
     per-ham-band risk tier, overall tier, total ERP, source counts, strongest."""
     info = {}
     for summit, g in joined.groupby("summit"):
         recv = {b: 0.0 for b, _ in HAM_BANDS}   # ham-band overload score (drives colour)
-        per_seg = {}                            # fixed (lo,hi,label) -> [(freq, src_id, power)]
-        unknown = 0.0                           # powered but no usable frequency
+        per_seg = {}                            # fixed (lo,hi,label) -> [(freq, src_id, power, dist)]
+        unk = {False: [0.0, None], True: [0.0, None]}   # is_far -> [power, nearest_dist]
         for i, r in enumerate(g.itertuples(index=False)):
             p = r.rf_max_power_w
             if pd.isna(p):
@@ -751,28 +774,35 @@ def _summit_analysis(joined):
                         recv[hb] += contrib
                 seg = _bin_of(f)
                 if seg:
-                    per_seg.setdefault(seg, []).append((f, i, p))
+                    per_seg.setdefault(seg, []).append((f, i, p, r.distance_m))
                     placed = True
-            if not placed:
-                unknown += p                    # e.g. TV ch>36 with blank freq
-        # within each fixed segment, cluster the actual freqs into tight bins
+            if not placed:                       # e.g. TV ch>36 with blank freq
+                ub = unk[r.distance_m > base_radius]
+                ub[0] += p
+                ub[1] = r.distance_m if ub[1] is None else min(ub[1], r.distance_m)
+        # cluster within each segment, keeping near and far sources separate so a
+        # far mast isn't merged into (and hidden behind) a co-sited near source.
         bins = []
         for (a, b, label), items in per_seg.items():
-            items.sort()
-            for lo, hi, w in _cluster_freqs(items):
-                bins.append((lo, hi, label, w))
+            for far in (False, True):
+                sub = sorted(it for it in items if (it[3] > base_radius) == far)
+                for lo, hi, w, dist in _cluster_freqs(sub):
+                    bins.append((lo, hi, label, w, dist))
         overall = max((_risk_tier(recv[hb]) for hb, _ in HAM_BANDS), key=RISK_ORDER.index)
         pw = g["rf_max_power_w"]
         total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
-        info[summit] = dict(overall=overall, total=total, bins=bins, unknown=unknown, n=len(g))
+        info[summit] = dict(overall=overall, total=total, bins=bins, n=len(g),
+                            unk_near=unk[False][0], unk_far=unk[True][0], unk_far_d=unk[True][1])
     return info
 
 
-def to_caltopo_summits(summary, joined, path):
+def to_caltopo_summits(summary, joined, path, base_radius=1000.0):
     """One point per summit that has ≥1 source, coloured by overload risk. The
     popup is terse: total ERP, then the ERP broken down by transmit band
-    (biggest first). Directly importable into CalTopo."""
-    info = _summit_analysis(joined)
+    (biggest first). A cluster whose nearest source is beyond `base_radius` (a
+    far high-ERP mast pulled in by the field-strength model) is tagged with its
+    distance, e.g. "(1.9km)". Directly importable into CalTopo."""
+    info = _summit_analysis(joined, base_radius)
     smeta = summary.set_index("summit")
     feats = []
     for code, d in info.items():
@@ -781,10 +811,12 @@ def to_caltopo_summits(summary, joined, path):
         # footprint, e.g. "151-159 MHz VHF  200 W". Clusters never span a ham
         # band; a source inside one is labelled by the ham band (e.g. "2m").
         rows = list(d["bins"])
-        if d["unknown"] > 0:
-            rows.append((None, None, "unknown freq", d["unknown"]))
+        if d["unk_near"] > 0:
+            rows.append((None, None, "unknown freq", d["unk_near"], None))
+        if d["unk_far"] > 0:
+            rows.append((None, None, "unknown freq", d["unk_far"], d["unk_far_d"]))
         band_lines = []
-        for lo, hi, label, w in sorted(rows, key=lambda t: -t[3]):
+        for lo, hi, label, w, dist in sorted(rows, key=lambda t: -t[3]):
             if lo is None:
                 head = label
             elif round(lo) == round(hi):                       # single frequency
@@ -793,7 +825,8 @@ def to_caltopo_summits(summary, joined, path):
                 head = f"{lo/1000:g}-{hi/1000:g} GHz {label}"
             else:
                 head = f"{round(lo)}-{round(hi)} MHz {label}"
-            band_lines.append(f"{head}  {human_w(w)}")
+            far = "" if (dist is None or dist <= base_radius) else f" ({dist/1000:.1f}km)"
+            band_lines.append(f"{head}  {human_w(w)}{far}")
         desc = (f'{s["name"]}\n'
                 f'Total ERP  {human_w(d["total"])}\n'
                 + "\n".join(band_lines))
@@ -937,7 +970,7 @@ def main():
     joined.to_csv(p_join, index=False)
     summary.to_csv(p_sum, index=False)
     n_geo = to_geojson(joined, p_geo) if len(joined) else 0
-    n_ct_sum = to_caltopo_summits(summary, joined, p_ct_sum) if len(joined) else 0
+    n_ct_sum = to_caltopo_summits(summary, joined, p_ct_sum, args.radius) if len(joined) else 0
     n_ct_src = to_caltopo_sources(joined, p_ct_src) if len(joined) else 0
 
     log("\n=== done ===")

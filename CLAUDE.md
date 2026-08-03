@@ -69,8 +69,15 @@ Layer toggles: `--no-uls` (ASR only), `--no-broadcast` (skip FM/TV/AM).
   key:** ULS `LO` records (and broadcast `asrn`) carry a tower registration
   number, surfaced as `rf_link_reg`; it matches an ASR registration number, so a
   transmitter is tied to the physical tower it sits on.
-- `spatial_join()` — sklearn `BallTree` haversine, `query_radius` per summit.
-  Drops sources with missing/out-of-range coords before indexing.
+- `spatial_join()` — sklearn `BallTree` haversine per summit. Drops
+  missing/out-of-range coords before indexing. **Field-strength inclusion:** a
+  source is kept if it's within the base `--radius` (near-field, any power) OR
+  its received-power proxy `ERP/d²` clears `FIELD_THRESHOLD_W_M2` (0.01 W/m² ≈ a
+  10 kW tx at 1 km), out to a computed max radius. So a Sutro-class 1 MW mast is
+  captured ~10 km out while distant low-power land-mobile is not — a flat radius
+  can't do both. The popup tags any source beyond the base radius with its
+  distance (`(1.9km)`), and near/far sources cluster separately so a far mast is
+  never hidden inside a co-sited near line.
 
 **FCC raw-record field indices are defined as dicts at the top of the script**
 (`CO`, `RA`, `EN_ASR`, `HD`, `EN_ULS`, `LO`, `FR` for ASR/ULS; `FAC`, `FM_ENG`,
