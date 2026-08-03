@@ -145,9 +145,11 @@ the end), but the indices above are verified against the real files.
   `marker-symbol: "point"` (small solid dot), `marker-color: "#hex"`, no
   `marker-size`. **Popup content** (per user feedback): terse — full name, total
   ERP, then the ERP broken down by **transmit band** (`88-108 MHz FM 425 kW`,
-  biggest first, via `RF_BANDS`), *not* by ham band; on-map label is the compact
-  SOTA code. Powered-but-unbinnable ERP (TV ch>36 with blank freq) shows as an
-  `unknown freq` line.
+  biggest first), *not* by ham band; on-map label is the compact SOTA code.
+  Bands are `SERVICE_BANDS` **split at every `HAM_ALLOC` edge** (`_build_rf_bins`)
+  so a reported range never spans a ham band; a source that lands inside a ham
+  band is called out under the ham label (e.g. `144-148 MHz 2m`). Powered-but-
+  unbinnable ERP (TV ch>36 with blank freq) shows as an `unknown freq` line.
 
 ## Roadmap / next tasks
 1. ~~**Run W6 live** and sanity-check.~~ **DONE** — see Current status.

@@ -620,14 +620,47 @@ RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
 RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
               "LOW": "#6da536", "CLEAR": "#4d7a20"}
 
-# Transmit-band breakdown for the popup: non-overlapping MHz bins + short label,
-# so a summit's ERP reads as e.g. "88-108 MHz FM 425 kW". Microwave carries no
-# ERP in ULS, so it never contributes power here.
-RF_BANDS = [("AM", 0.5, 1.71), ("HF", 1.71, 50), ("VHF-lo", 50, 88),
-            ("FM", 88, 108), ("air", 108, 137), ("VHF", 137, 174),
-            ("VHF-TV", 174, 225), ("UHF", 400, 470), ("UHF-TV", 470, 700),
-            ("700/800/900", 700, 960), ("microwave", 960, 60000)]
-RF_BAND_RANGE = {label: (lo, hi) for label, lo, hi in RF_BANDS}
+# Transmit-band breakdown for the popup. Coarse service groupings (below) may
+# nominally span a ham band; they are SPLIT at every ham-band edge so a reported
+# range never crosses a ham allocation, and any source that lands inside a ham
+# band is called out under the ham-band label (e.g. "144-148 MHz 2m").
+SERVICE_BANDS = [("AM", 0.5, 1.71), ("HF", 1.71, 50), ("VHF-lo", 50, 88),
+                 ("FM", 88, 108), ("air", 108, 137), ("VHF", 137, 174),
+                 ("VHF-TV", 174, 225), ("gov", 225, 400), ("UHF", 400, 470),
+                 ("UHF-TV", 470, 700), ("700/800/900", 700, 960),
+                 ("microwave", 960, 60000)]
+# US amateur allocations within range (label, lo, hi MHz).
+HAM_ALLOC = [("160m", 1.8, 2.0), ("80m", 3.5, 4.0), ("40m", 7.0, 7.3),
+             ("30m", 10.1, 10.15), ("20m", 14.0, 14.35), ("17m", 18.068, 18.168),
+             ("15m", 21.0, 21.45), ("12m", 24.89, 24.99), ("10m", 28.0, 29.7),
+             ("6m", 50.0, 54.0), ("2m", 144.0, 148.0), ("1.25m", 222.0, 225.0),
+             ("70cm", 420.0, 450.0), ("33cm", 902.0, 928.0),
+             ("23cm", 1240.0, 1300.0), ("13cm", 2300.0, 2450.0)]
+
+
+def _build_rf_bins():
+    """Split the service bands at every ham-band edge -> contiguous, non-ham-
+    spanning bins. Each is (lo, hi, label, is_ham)."""
+    edges = sorted({e for _, lo, hi in SERVICE_BANDS + HAM_ALLOC for e in (lo, hi)})
+    bins = []
+    for a, b in zip(edges, edges[1:]):
+        mid = (a + b) / 2
+        ham = next((n for n, lo, hi in HAM_ALLOC if lo <= mid < hi), None)
+        svc = next((n for n, lo, hi in SERVICE_BANDS if lo <= mid < hi), None)
+        if ham or svc:
+            bins.append((a, b, ham or svc, ham is not None))
+    return bins
+
+
+RF_BINS = _build_rf_bins()
+
+
+def _bin_of(f):
+    """Frequency (MHz) -> (lo, hi, label) of its bin, or None if uncovered."""
+    for a, b, label, _ in RF_BINS:
+        if a <= f < b:
+            return (a, b, label)
+    return None
 
 
 def _risk_tier(score):
@@ -688,9 +721,9 @@ def _summit_analysis(joined):
                 for b, fc in HAM_BANDS:
                     if 0.5 * fc <= f <= 2 * fc:
                         recv[b] += contrib
-            hit = {label for f in fs for label, lo, hi in RF_BANDS if lo <= f < hi}
-            for label in (hit or {"unknown freq"}):   # powered but unbinnable (e.g. TV ch>36)
-                bandp[label] = bandp.get(label, 0.0) + p
+            hit = {bn for f in fs if (bn := _bin_of(f)) is not None}
+            for key in (hit or {(None, None, "unknown freq")}):   # e.g. TV ch>36, blank freq
+                bandp[key] = bandp.get(key, 0.0) + p
         overall = max((_risk_tier(recv[b]) for b, _ in HAM_BANDS), key=RISK_ORDER.index)
         pw = g["rf_max_power_w"]
         total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
@@ -707,16 +740,16 @@ def to_caltopo_summits(summary, joined, path):
     feats = []
     for code, d in info.items():
         s = smeta.loc[code]
-        # RF-band breakdown, biggest ERP first: "88-108 MHz FM  425 kW"
+        # RF-band breakdown, biggest ERP first: "88-108 MHz FM  425 kW". Bins
+        # never span a ham band; in-ham sources appear under the ham label.
         band_lines = []
-        for label, w in sorted(d["bandp"].items(), key=lambda kv: -kv[1]):
-            rng = RF_BAND_RANGE.get(label)
-            if not rng:
+        for (a, b, label), w in sorted(d["bandp"].items(), key=lambda kv: -kv[1]):
+            if a is None:
                 head = label
-            elif rng[1] >= 6000:               # microwave catch-all: show ">lo"
-                head = f">{rng[0]:g} MHz {label}"
+            elif b >= 6000:                    # microwave catch-all: show ">lo"
+                head = f">{a:g} MHz {label}"
             else:
-                head = f"{rng[0]:g}-{rng[1]:g} MHz {label}"
+                head = f"{a:g}-{b:g} MHz {label}"
             band_lines.append(f"{head}  {human_w(w)}")
         desc = (f'{s["name"]}\n'
                 f'Total ERP  {human_w(d["total"])}\n'
