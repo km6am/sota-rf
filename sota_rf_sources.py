@@ -624,11 +624,11 @@ RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
 # nominally span a ham band; they are SPLIT at every ham-band edge so a reported
 # range never crosses a ham allocation, and any source that lands inside a ham
 # band is called out under the ham-band label (e.g. "144-148 MHz 2m").
-SERVICE_BANDS = [("AM", 0.5, 1.71), ("HF", 1.71, 50), ("VHF-lo", 50, 88),
-                 ("FM", 88, 108), ("air", 108, 137), ("VHF", 137, 174),
-                 ("VHF-TV", 174, 225), ("gov", 225, 400), ("UHF", 400, 470),
-                 ("UHF-TV", 470, 700), ("700/800/900", 700, 960),
-                 ("microwave", 960, 60000)]
+SERVICE_BANDS = [("AM", 0.5, 1.71), ("HF", 1.71, 30), ("low-VHF", 30, 50),
+                 ("VHF-lo", 50, 88), ("FM", 88, 108), ("air", 108, 137),
+                 ("VHF", 137, 174), ("VHF-TV", 174, 225), ("gov", 225, 400),
+                 ("UHF", 400, 470), ("UHF-TV", 470, 700),
+                 ("700/800/900", 700, 960), ("microwave", 960, 60000)]
 # US amateur allocations within range (label, lo, hi MHz).
 HAM_ALLOC = [("160m", 1.8, 2.0), ("80m", 3.5, 4.0), ("40m", 7.0, 7.3),
              ("30m", 10.1, 10.15), ("20m", 14.0, 14.35), ("17m", 18.068, 18.168),
@@ -663,6 +663,29 @@ def _bin_of(f):
     return None
 
 
+CLUSTER_RATIO = 1.10   # sources within 10% of each other share a popup bin
+
+
+def _cluster_freqs(items):
+    """items: list of (freq, src_id, power) sorted by freq. Single-linkage
+    cluster where the next freq is within CLUSTER_RATIO of the previous, so a
+    tight land-mobile group is called out at its real footprint rather than
+    lumped into the whole service band. Yields (lo, hi, power) per cluster, power
+    summed once per source (a licence on several channels counts once)."""
+    def emit(cl):
+        by_src = {sid: p for _, sid, p in cl}   # dedupe power per source
+        return (cl[0][0], cl[-1][0], sum(by_src.values()))
+    cluster, prev = [], None
+    for it in items:
+        if prev is not None and it[0] > prev * CLUSTER_RATIO:
+            yield emit(cluster)
+            cluster = []
+        cluster.append(it)
+        prev = it[0]
+    if cluster:
+        yield emit(cluster)
+
+
 def _risk_tier(score):
     if score >= 20:  return "HIGH"
     if score >= 3:   return "MODERATE"
@@ -677,6 +700,11 @@ def human_w(w):
     if w >= 1e6: return f"{w/1e6:.2f} MW"
     if w >= 1e3: return f"{w/1e3:.0f} kW"
     return f"{w:.0f} W"
+
+
+def _fmt_freq(mhz):
+    """A single frequency, MHz below 1 GHz else GHz."""
+    return f"{mhz/1000:g} GHz" if mhz >= 1000 else f"{mhz:g} MHz"
 
 
 # thermal ramp (cool -> hot), matching the report-card mockup
@@ -703,31 +731,40 @@ def _summit_analysis(joined):
     info = {}
     for summit, g in joined.groupby("summit"):
         recv = {b: 0.0 for b, _ in HAM_BANDS}   # ham-band overload score (drives colour)
-        bandp = {}                              # transmit-band ERP total (drives popup)
-        for _, r in g.iterrows():
-            p = r["rf_max_power_w"]
+        per_seg = {}                            # fixed (lo,hi,label) -> [(freq, src_id, power)]
+        unknown = 0.0                           # powered but no usable frequency
+        for i, r in enumerate(g.itertuples(index=False)):
+            p = r.rf_max_power_w
             if pd.isna(p):
                 continue
-            contrib = p / (max(r["distance_m"], 10.0) ** 2)
-            fs = []
-            for tok in str(r["rf_freqs_mhz"]).split(";"):
+            contrib = p / (max(r.distance_m, 10.0) ** 2)
+            placed = False
+            for tok in str(r.rf_freqs_mhz).split(";"):
                 try:
                     f = float(tok)
                 except ValueError:
                     continue
-                if not np.isnan(f):
-                    fs.append(f)
-            for f in fs:
-                for b, fc in HAM_BANDS:
+                if np.isnan(f):
+                    continue
+                for hb, fc in HAM_BANDS:
                     if 0.5 * fc <= f <= 2 * fc:
-                        recv[b] += contrib
-            hit = {bn for f in fs if (bn := _bin_of(f)) is not None}
-            for key in (hit or {(None, None, "unknown freq")}):   # e.g. TV ch>36, blank freq
-                bandp[key] = bandp.get(key, 0.0) + p
-        overall = max((_risk_tier(recv[b]) for b, _ in HAM_BANDS), key=RISK_ORDER.index)
+                        recv[hb] += contrib
+                seg = _bin_of(f)
+                if seg:
+                    per_seg.setdefault(seg, []).append((f, i, p))
+                    placed = True
+            if not placed:
+                unknown += p                    # e.g. TV ch>36 with blank freq
+        # within each fixed segment, cluster the actual freqs into tight bins
+        bins = []
+        for (a, b, label), items in per_seg.items():
+            items.sort()
+            for lo, hi, w in _cluster_freqs(items):
+                bins.append((lo, hi, label, w))
+        overall = max((_risk_tier(recv[hb]) for hb, _ in HAM_BANDS), key=RISK_ORDER.index)
         pw = g["rf_max_power_w"]
         total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
-        info[summit] = dict(overall=overall, total=total, bandp=bandp, n=len(g))
+        info[summit] = dict(overall=overall, total=total, bins=bins, unknown=unknown, n=len(g))
     return info
 
 
@@ -740,16 +777,22 @@ def to_caltopo_summits(summary, joined, path):
     feats = []
     for code, d in info.items():
         s = smeta.loc[code]
-        # RF-band breakdown, biggest ERP first: "88-108 MHz FM  425 kW". Bins
-        # never span a ham band; in-ham sources appear under the ham label.
+        # RF breakdown, biggest ERP first: tight frequency clusters at their real
+        # footprint, e.g. "151-159 MHz VHF  200 W". Clusters never span a ham
+        # band; a source inside one is labelled by the ham band (e.g. "2m").
+        rows = list(d["bins"])
+        if d["unknown"] > 0:
+            rows.append((None, None, "unknown freq", d["unknown"]))
         band_lines = []
-        for (a, b, label), w in sorted(d["bandp"].items(), key=lambda kv: -kv[1]):
-            if a is None:
+        for lo, hi, label, w in sorted(rows, key=lambda t: -t[3]):
+            if lo is None:
                 head = label
-            elif b >= 6000:                    # microwave catch-all: show ">lo"
-                head = f">{a:g} MHz {label}"
+            elif round(lo) == round(hi):                       # single frequency
+                head = f"{_fmt_freq(lo)} {label}"
+            elif lo >= 1000:                                   # GHz range
+                head = f"{lo/1000:g}-{hi/1000:g} GHz {label}"
             else:
-                head = f"{a:g}-{b:g} MHz {label}"
+                head = f"{round(lo)}-{round(hi)} MHz {label}"
             band_lines.append(f"{head}  {human_w(w)}")
         desc = (f'{s["name"]}\n'
                 f'Total ERP  {human_w(d["total"])}\n'

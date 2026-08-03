@@ -147,9 +147,13 @@ the end), but the indices above are verified against the real files.
   ERP, then the ERP broken down by **transmit band** (`88-108 MHz FM 425 kW`,
   biggest first), *not* by ham band; on-map label is the compact SOTA code.
   Bands are `SERVICE_BANDS` **split at every `HAM_ALLOC` edge** (`_build_rf_bins`)
-  so a reported range never spans a ham band; a source that lands inside a ham
-  band is called out under the ham label (e.g. `144-148 MHz 2m`). Powered-but-
-  unbinnable ERP (TV ch>36 with blank freq) shows as an `unknown freq` line.
+  so a range never spans a ham band; a source inside a ham band is called out
+  under the ham label (`144-148 MHz 2m`). Within each fixed segment the actual
+  source freqs are **clustered** (`_cluster_freqs`, single-linkage at
+  `CLUSTER_RATIO`=10%) so a tight land-mobile group shows at its real footprint
+  (`151-159 MHz VHF 200 W`) rather than the whole segment; power is summed once
+  per licence. Powered-but-unbinnable ERP (TV ch>36, blank freq) → `unknown
+  freq` line.
 
 ## Roadmap / next tasks
 1. ~~**Run W6 live** and sanity-check.~~ **DONE** — see Current status.
