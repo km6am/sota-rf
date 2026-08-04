@@ -69,9 +69,12 @@ URLS = {
     },
 }
 
-# US SOTA association code prefixes (SummitCode starts with one of these + "/").
-US_PREFIXES = ("W0", "W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9",
-               "KH6", "KH8", "KL7", "KP4")
+# US SOTA association-code prefixes. A summit is "US" when its association (the
+# part before "/") STARTS WITH one of these. Most W-regions are split into
+# lettered sub-associations (W7A, W0C, W4G, …) and the territories use KH*/KL*/
+# KP* (Pacific / Alaska / Caribbean) — all exclusively US in SOTA — so matching
+# the whole "W"/"KH"/"KL"/"KP" families catches them all (and future ones).
+US_PREFIXES = ("W", "KH", "KL", "KP")
 
 # --------------------------------------------------------------------------- #
 # Raw-record column indices (0-based, after splitting a line on "|")
@@ -223,10 +226,12 @@ def load_summits(path, prefixes):
     hdr_i = next(i for i, ln in enumerate(lines) if ln.startswith("SummitCode"))
     reader = csv.DictReader(io.StringIO("\n".join(lines[hdr_i:])))
     rows = []
-    pref = tuple(p + "/" for p in prefixes)
+    pref = tuple(prefixes)
     for r in reader:
         code = (r.get("SummitCode") or "").strip()
-        if not code.startswith(pref):
+        # match on the association (part before "/"), so "W7" catches W7A/W7O/…
+        # and a specific sub-association like "W7A" still works exactly.
+        if not code.split("/", 1)[0].startswith(pref):
             continue
         lat, lon = to_float(r.get("Latitude")), to_float(r.get("Longitude"))
         if np.isnan(lat) or np.isnan(lon):
