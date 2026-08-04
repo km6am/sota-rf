@@ -171,7 +171,16 @@ the end), but the indices above are verified against the real files.
    Future: enrich with licensee/owner name (needs an `app_party`/parties join;
    currently `owner` = callsign + community), and optionally an LMS loader for
    current data once a non-bot-blocked download path is found.
-4. **Full `--us` run** once layers are in.
+4. ~~**Full `--us` run**~~ **DONE.** Generating the national map surfaced a
+   coverage bug: `US_PREFIXES`/matching only caught single-association regions,
+   dropping all lettered sub-associations (W7A, W0C, W4G, KLA…) — the whole
+   mountain West, Colorado, Southeast, Alaska. Fixed (match the association part
+   vs W/KH/KL/KP). National run: **50,950 US summits** (was a broken 6,688) vs
+   1.23 M sources → 61,739 near + 855 far hits; **3,547 impacted** (415 HIGH ·
+   552 MOD · 537 LOW · 2,043 CLEAR). Validated by the marquee Western broadcast
+   peaks finally appearing — Mount Ord (Phoenix), Sandia Crest (Albuquerque),
+   Farnsworth Pk (Salt Lake). Ran in minutes here, so the monthly deploy rebuild
+   is light, not heavy. Sources layer is 26 MB / 59 k pts → WFS-only, not import.
 5. Optional: collapse ULS-on-ASR matches (`rf_link_reg`) into single structure
    rows that list their frequencies inline, for a cleaner per-structure view.
 6. ~~Sanity-cap absurd ULS `power_erp` outliers.~~ **DONE** — `load_uls()` drops
