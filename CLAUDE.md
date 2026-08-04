@@ -198,8 +198,11 @@ the end), but the indices above are verified against the real files.
    - (b) ~~standalone **RF report-card** web page~~ **DONE** — `write_report_card()`
      + `--report <SUMMIT>` emit a self-contained per-summit HTML (spectrum:
      band-power bars + per-emitter scatter + ham-band overload markers, plus a
-     scrollable source table) from `report_template.html`. The browser deep-dive
-     CalTopo can't host. (c) tune risk thresholds / octave window with ground truth;
+     scrollable source table) from `report_template.html`, with a **data-provenance
+     footer** — `data_provenance()` reads each FCC zip's internal generation date
+     + the SOTA list's header date (also printed as a "data as of" line in the run
+     log). The browser deep-dive CalTopo can't host. (c) tune risk thresholds /
+     octave window with ground truth;
      (d) true per-record delta updates (FCC daily transaction files → a
      persistent datastore) if the monthly full pull is too heavy.
 

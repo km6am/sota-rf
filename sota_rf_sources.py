@@ -27,9 +27,11 @@ Field layouts:
 
 import argparse
 import csv
+import datetime
 import io
 import json
 import os
+import re
 import sys
 import zipfile
 from collections import defaultdict
@@ -174,6 +176,66 @@ def read_dat_from_zip(zip_path, member):
 
 def g(row, idx):
     return row[idx] if idx < len(row) else ""
+
+
+def _zip_gen_date(path):
+    """The FCC generation date baked into an FCC zip (its newest member's date)."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            dts = [i.date_time for i in z.infolist()
+                   if i.filename.lower().endswith((".dat", "counts"))]
+        if dts:
+            y, mo, dy, *_ = max(dts)
+            return f"{y:04d}-{mo:02d}-{dy:02d}"
+    except Exception:
+        pass
+    return None
+
+
+def _sota_list_date(path):
+    """The version date from the SOTA summit list's header line."""
+    try:
+        with open(path, encoding="cp1252", errors="replace") as f:
+            first = f.readline()
+        m = re.search(r"(\d{2})/(\d{2})/(\d{4})", first)
+        if m:
+            dy, mo, y = m.groups()
+            return f"{y}-{mo}-{dy}"
+        m = re.search(r"\d{4}-\d{2}-\d{2}", first)
+        if m:
+            return m.group(0)
+    except Exception:
+        pass
+    return None
+
+
+def data_provenance(summits_file, asr_file, uls_files, broadcast_files):
+    """(label, date) for each source dataset — when its data was generated
+    upstream — so outputs can show a 'data as of' summary. CDBS is a frozen
+    snapshot, flagged as such."""
+    newest = {}   # label -> newest date string
+
+    def add(label, d):
+        if d and (label not in newest or d > newest[label]):
+            newest[label] = d
+
+    if summits_file:
+        add("SOTA summits", _sota_list_date(summits_file))
+    if asr_file:
+        add("FCC ASR towers", _zip_gen_date(asr_file))
+    for u in (uls_files or []):
+        base = os.path.basename(u or "").lower()
+        add("FCC ULS microwave" if "micro" in base else "FCC ULS land-mobile",
+            _zip_gen_date(u))
+    order = ["SOTA summits", "FCC ASR towers",
+             "FCC ULS land-mobile", "FCC ULS microwave"]
+    items = [(lbl, newest[lbl]) for lbl in order if lbl in newest]
+    bfile = next((p for p in (broadcast_files or []) if p), None)
+    if bfile:
+        cdbs = _zip_gen_date(bfile)
+        if cdbs:
+            items.append(("FCC CDBS broadcast", f"{cdbs} (frozen)"))
+    return items
 
 
 def to_float(x):
@@ -974,9 +1036,12 @@ def _report_data(joined, summits, code, base_radius=1000.0):
         scatter=scatter, ham=ham, emitters=emitters)
 
 
-def write_report_card(joined, summits, code, out_path, base_radius=1000.0, template=None):
+def write_report_card(joined, summits, code, out_path, base_radius=1000.0,
+                      template=None, provenance=None):
     tpl = template or os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_template.html")
     data = _report_data(joined, summits, code, base_radius)
+    data["provenance"] = [{"label": l, "date": d} for l, d in (provenance or [])]
+    data["generated"] = datetime.date.today().isoformat()
     with open(tpl, encoding="utf-8") as f:
         html = f.read()
     with open(out_path, "w", encoding="utf-8") as f:
@@ -1035,7 +1100,7 @@ def main():
     afile = fetch(URLS["asr"], "r_tower.zip", args.asr_file)
     asr = load_asr(afile)
 
-    uls = None
+    uls, ufiles = None, []
     if not args.no_uls:
         log("[3/5] ULS land-mobile + microwave (freq + power)")
         ufiles = args.uls_file or [fetch(u, os.path.basename(u), None)
@@ -1046,7 +1111,7 @@ def main():
         else:
             log("  (no ULS files available; structures only)")
 
-    bcast = None
+    bcast, bfiles = None, []
     if not args.no_broadcast:
         log("[4/5] broadcast FM/TV/AM (CDBS media)")
         if args.broadcast_dir:
@@ -1055,6 +1120,7 @@ def main():
         else:
             bf = {k: fetch(u, os.path.basename(u), None)
                   for k, u in URLS["broadcast"].items()}
+        bfiles = [p for p in bf.values() if p and os.path.exists(p)]
         if all(bf[k] and os.path.exists(bf[k]) for k in URLS["broadcast"]):
             bcast = load_broadcast(bf["facility"], bf["fm_eng_data"],
                                    bf["tv_eng_data"], bf["am_eng_data"],
@@ -1068,6 +1134,7 @@ def main():
     rf = merge_sources(asr, uls, bcast)
     joined = spatial_join(summits, rf, args.radius)
     summary = summarise(joined, summits)
+    prov = data_provenance(sfile, afile, ufiles, bfiles)
 
     p_join = os.path.join(args.out_dir, f"{tag}_rf_sources.csv")
     p_sum = os.path.join(args.out_dir, f"{tag}_summit_summary.csv")
@@ -1086,11 +1153,13 @@ def main():
             p_report = write_report_card(
                 joined, summits, args.report,
                 os.path.join(args.out_dir, args.report.replace("/", "_") + "_report.html"),
-                args.radius)
+                args.radius, provenance=prov)
         except ValueError as e:
             log(f"  report: {e}")
 
     log("\n=== done ===")
+    if prov:
+        log("data as of : " + " · ".join(f"{lbl} {d}" for lbl, d in prov))
     log(f"summits processed : {len(summits)}")
     log(f"RF sources in DB   : {len(rf)}  (ASR {len(asr) if asr is not None else 0}"
         f" + ULS {0 if uls is None else len(uls)}"
