@@ -1,22 +1,30 @@
 # SOTA summit RF-source mapper
 
-Identify the fixed RF sources sitting on or beside SOTA summits, by spatially
-joining the SOTA summit list against two public FCC datasets:
+Catalog the fixed RF sources sitting on or beside [SOTA](https://www.sota.org.uk/)
+summits, and flag the ones likely to overload a QRP receiver — by spatially
+joining the SOTA summit list against three public FCC datasets.
 
-| Layer | Source file | What it gives you |
-|-------|-------------|-------------------|
-| **Structures** | FCC ASR `r_tower.zip` | Registered antenna structures (towers/masts > ~200 ft AGL or near airports): location, owner, height, structure type |
-| **Transmitters** | FCC ULS Land Mobile `l_LMcomm.zip`, `l_LMpriv.zip` | Licensed land-mobile stations: location, owner, **frequencies and power (ERP)** |
-| **Summits** | SOTA `summitslist.csv` | Every summit's reference, name, coordinates, elevation |
+This is the RF environment that causes receiver overload / desense / intermod when
+you activate a summit co-sited with broadcast or public-safety infrastructure. The
+tool answers, per summit: *how much RF power is here, in which bands, and how bad is
+it for the ham band I want to operate?*
 
-The two FCC layers are **merged**: ULS location records carry a
-`tower_registration_number`, so a transmitter license can be tied back to the
-exact ASR structure it lives on (surfaced in the `rf_link_reg` column). That
-lets you see, for one summit, both "there's a 120 m tower here owned by X" and
-"and it's radiating 155 MHz at 250 W."
+## Data sources
 
-This is the same RF environment that causes receiver overload / desense when you
-activate a summit co-sited with broadcast or public-safety infrastructure.
+Three FCC dataset families are merged with the SOTA summit list (exact files and
+download URLs in [SOURCES.md](SOURCES.md)):
+
+| Layer | Source | What it gives you |
+|---|---|---|
+| **Structures** | FCC ASR `r_tower.zip` | Registered towers/masts (> ~200 ft AGL or near airports): location, owner, height, structure type |
+| **Land-mobile + microwave** | FCC ULS `l_LMcomm.zip`, `l_LMpriv.zip`, `l_micro.zip` | Licensed transmitters: location, owner, **frequency + power (ERP)**; microwave adds 6/11/18 GHz backhaul/STL paths (freq + location, no power) |
+| **Broadcast** | FCC CDBS `facility.zip` + FM/TV/AM engineering tables | FM/TV/AM stations: callsign, **frequency/channel + ERP** — usually the megawatt-class offenders |
+| **Summits** | SOTA `summitslist.csv` | Every summit's code, name, coordinates, elevation |
+
+The layers are **merged**: ULS location records and broadcast facilities carry a
+tower registration number (surfaced as `rf_link_reg`), so a transmitter is tied
+back to the ASR structure it lives on. That lets you see, for one summit, both
+"there's a 120 m tower here owned by X" and "and it's radiating 155 MHz at 250 W."
 
 ## Install
 
@@ -26,32 +34,25 @@ pip install pandas numpy scikit-learn
 
 ## Run
 
-Proof-of-concept, one association (downloads + caches the data automatically if
-your network can reach data.fcc.gov and sotadata.org.uk):
+Proof-of-concept, one association (auto-downloads + caches the data if your network
+can reach data.fcc.gov, transition.fcc.gov and sotadata.org.uk):
 
 ```
 python3 sota_rf_sources.py --association W6 --radius 1000
 ```
 
-All US associations at once (this is the eventual goal; same code, one flag):
+All US associations at once (~51k summits; same code, one flag):
 
 ```
 python3 sota_rf_sources.py --us --radius 1000
 ```
 
-If your environment can't reach the FCC / SOTA hosts, download the three files
-yourself and point at them:
+If your environment can't reach the FCC / SOTA hosts, download the files yourself
+(see [SOURCES.md](SOURCES.md)) into `--data-dir` and run with `--no-download`.
 
-```
-python3 sota_rf_sources.py --association W6 \
-    --summits-file summitslist.csv \
-    --asr-file r_tower.zip \
-    --uls-file l_LMcomm.zip --uls-file l_LMpriv.zip
-```
-
-Useful flags: `--radius` (metres around each summit), `--no-uls` (structures
-only, much faster), `--no-download` (use cached files in `--data-dir`),
-`--out-dir`.
+Useful flags: `--radius` (base radius, metres), `--no-uls` (structures only),
+`--no-broadcast` (skip FM/TV/AM), `--no-download` (use cached files in
+`--data-dir`), `--broadcast-dir`, `--out-dir`.
 
 ## Data & updates
 
@@ -105,72 +106,99 @@ the changed complete files. (True per-record deltas from FCC's *daily transactio
 files would need a persistent datastore — a possible future upgrade, not needed at
 monthly cadence.)
 
+## Overload-risk model
+
+Two ideas turn a list of nearby transmitters into a per-summit risk read:
+
+- **Field-strength inclusion** — a source is kept if it's within the base
+  `--radius` (near-field, any power) **or** its received-power proxy `ERP / d²`
+  clears a floor (≈ a 10 kW transmitter at 1 km). So a 1 MW broadcast mast is
+  captured ~10 km out while distant low-power land-mobile is not — a flat radius
+  can't do both. (This is what surfaces Sutro Tower's ~7 MW on Mt Davidson, 1.9 km
+  away, that a 1 km cutoff misses entirely.)
+- **Per-ham-band risk** — for each amateur band an activator uses (40 m … 23 cm),
+  score `Σ ERP / d²` over sources within a ±octave window; tier it
+  **HIGH / MODERATE / LOW / CLEAR**. The summit's overall tier is its worst band,
+  and drives the map marker colour (green → red).
+
 ## Output
 
-Three files, prefixed by the association (or `US`):
+Files prefixed by the association (or `US`):
 
-- **`<ASSOC>_rf_sources.csv`** — one row per (summit, RF source) within the
-  radius. Columns: `summit`, `summit_name`, `distance_m`, then `rf_source_db`
-  (`ASR`/`ULS`), `rf_ref`, `rf_owner`, `rf_struct_type`, `rf_height_agl_m`,
-  `rf_freqs_mhz`, `rf_max_power_w`, `rf_link_reg`, …
-- **`<ASSOC>_summit_summary.csv`** — one row per summit: source counts
-  (`rf_source_count`, `asr_count`, `uls_count`), `nearest_m`, `nearest_owner`,
-  `max_struct_height_m`. Sort by `rf_source_count` to rank the RF-hot summits.
-- **`<ASSOC>_rf_sources.geojson`** — deduplicated points for mapping. Drop into
-  QGIS or geojson.io to see the sources overlaid on terrain.
+- **`<ASSOC>_rf_sources.csv`** — one row per (summit, source) kept. Columns:
+  `summit`, `summit_name`, `distance_m`, then `rf_source_db` (`ASR`/`ULS`/`FM`/
+  `TV`/`AM`), `rf_ref`, `rf_owner`, `rf_freqs_mhz`, `rf_max_power_w`, `rf_services`,
+  `rf_link_reg`, …
+- **`<ASSOC>_summit_summary.csv`** — one row per summit: source counts, `nearest_m`,
+  `nearest_owner`, `max_struct_height_m`, `max_power_w`. Sort by `rf_source_count`
+  to rank the RF-hot summits.
+- **`<ASSOC>_rf_sources.geojson`** — deduplicated source points for QGIS / geojson.io.
+- **`<ASSOC>_summits_caltopo.geojson`** — **the summit-risk map layer.** One pin per
+  impacted summit, `marker-color` by overload risk, popup = total ERP then the ERP
+  broken down by transmit band (`88-108 MHz FM  425 kW`, biggest first; far sources
+  tagged with distance). Direct-importable into [CalTopo](https://caltopo.com), or
+  served live over WFS (see [DEPLOY_SOTA_WFS.md](DEPLOY_SOTA_WFS.md)).
+- **`<ASSOC>_sources_caltopo.geojson`** — one pin per individual source, `marker-color`
+  by ERP. Large nationally (~60k points) — best served over WFS/bbox, not imported.
+
+CalTopo popups are plain text (no HTML/images/links), so the analysis rides in the
+feature's `title` (the SOTA code) + `description`, and severity in `marker-color`;
+the marker symbol is `point` (CalTopo's small dot). See
+[DEPLOY_SOTA_WFS.md](DEPLOY_SOTA_WFS.md) for the WFS layer + CalTopo URL.
 
 ## Choosing the radius
 
-There's no single "on the summit" distance — the SOTA activation zone is defined
-vertically (within 25 m of the summit elevation), which maps to anything from a
-couple hundred metres to ~1 km horizontally depending on the peak. Defaults:
+`--radius` sets the **base** (near-field) radius; the field-strength model then
+extends it for high-ERP sources only. There's no single "on the summit" distance —
+the SOTA activation zone is vertical (within 25 m of the summit elevation), which
+maps to a couple hundred metres to ~1 km horizontally depending on the peak:
 
 - `--radius 250` — installations essentially on the summit block
 - `--radius 1000` — summit-top sites (default; good general choice)
-- `--radius 2000` — also catch nearby high sites that can still overload a receiver
+- `--radius 2000` — also catch nearby high sites at any power
+
+High-ERP broadcast is pulled in well beyond `--radius` regardless, by field strength.
 
 ## Coverage and known gaps
 
-What this captures well:
-- All ASR-registered structures (the tall masts that crown summits), regardless
-  of service — including broadcast and cell towers, which appear as *structures*
-  even when their frequencies come from elsewhere.
-- Land-mobile transmitters with real frequency + ERP (public-safety repeaters,
-  business radio — the bulk of mountaintop two-way activity).
+Captured well:
+- All ASR-registered structures (the tall masts that crown summits).
+- Land-mobile + microwave transmitters with real frequency + ERP (public-safety
+  repeaters, business radio, 6/11/18 GHz backhaul).
+- Broadcast FM/TV/AM — the megawatt-class offenders.
 
-Also included now (beyond the two core layers above):
-- **Microwave point-to-point** — `l_micro.zip`, sharing the ULS HD/EN/LO/FR
-  layout; adds 6/11/18 GHz backhaul/STL paths (frequency + location, no power).
-- **Broadcast FM / TV / AM** — from the FCC CDBS media dataset; usually the
-  highest-ERP offenders on summits like Diablo or San Bruno.
-
-Still not included:
+Still not included / caveats:
 - **Cellular** — licensed by geographic area, so exact site coordinates aren't in
-  ULS. The physical towers still show up via ASR.
-
-Other notes:
+  ULS; the physical towers still show up via ASR.
+- **Broadcast currency** — CDBS is a frozen ~2024-01 snapshot (good for long-lived
+  high-ERP incumbents, stale for recent low-power additions); the live LMS successor
+  is bot-blocked against scripted download.
 - ASR only requires registration above ~200 ft AGL (or near airports), so short
-  structures may be absent.
-- Not every ASR record has surface coordinates; those are skipped.
-- FCC "complete" snapshots refresh weekly; re-download for current data.
+  structures may be absent; records without surface coordinates are skipped.
+- Some ULS `power_erp` values are data-entry garbage (multi-MW "STL" mislabels);
+  these are capped at 1 MW so they can't dominate a summit's total.
 
 ## Field layouts
 
-The raw FCC `.dat` files are pipe-delimited with no headers and split
-coordinates across degree/minute/second columns. Column indices used here follow
-the published FCC public-access record layouts (Tower: CO/RA/EN; ULS: HD/EN/LO/FR)
-and were cross-checked against existing open-source loaders. They're defined at
-the top of `sota_rf_sources.py` so you can audit or extend them.
+The raw FCC `.dat` files are pipe-delimited, no headers, cp1252, with split
+degree/minute/second coordinate columns. Column indices follow the published FCC
+public-access record layouts (ASR: CO/RA/EN; ULS: HD/EN/LO/FR; CDBS: facility +
+per-service engineering tables) and are defined as dicts at the top of
+`sota_rf_sources.py` so you can audit or extend them.
 
 ## Self-test
 
 `selftest_fixtures.py` writes tiny synthetic files in the exact raw formats and
-runs the pipeline against them, so you can confirm parsing/merge/spatial-join
-behaviour without downloading hundreds of MB:
+asserts the loaders, the kW→W / channel→freq broadcast conversions, the ULS
+power-cap, and the CalTopo scoring — so you can verify behaviour without
+downloading hundreds of MB:
 
 ```
-python3 selftest_fixtures.py        # writes ./fixtures/
-python3 sota_rf_sources.py --association W6 --radius 1000 --out-dir testout \
+python3 selftest_fixtures.py        # writes ./fixtures/ and runs the asserts
+python3 sota_rf_sources.py --association W6 --radius 2000 --out-dir testout \
     --summits-file fixtures/summitslist.csv \
-    --asr-file fixtures/r_tower.zip --uls-file fixtures/l_LMcomm.zip
+    --asr-file fixtures/r_tower.zip --uls-file fixtures/l_LMcomm.zip \
+    --broadcast-dir fixtures
 ```
+
+More detail on architecture and design decisions is in [CLAUDE.md](CLAUDE.md).
