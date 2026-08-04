@@ -53,6 +53,58 @@ Useful flags: `--radius` (metres around each summit), `--no-uls` (structures
 only, much faster), `--no-download` (use cached files in `--data-dir`),
 `--out-dir`.
 
+## Data & updates
+
+The pipeline reads three families of public data — full list, exact files, and
+download URLs in [SOURCES.md](SOURCES.md):
+
+- **SOTA** `summitslist.csv` — the summits (refreshed daily upstream).
+- **FCC ULS + ASR** — land-mobile, microwave, and registered towers. FCC rebuilds
+  these "complete" files **weekly**.
+- **FCC CDBS broadcast** (FM/TV/AM) — a **frozen** ~2024-01 snapshot (broadcast
+  e-filing moved to LMS), so it never changes: fetched once, then skipped forever.
+
+### One-off / manual
+
+A normal run auto-downloads and caches into `--data-dir` (`fccdata/`). For an
+offline or repeat run, use `--no-download` to reuse the cache. The big ULS zips
+can exceed `urllib`'s read timeout, so for a manual pull fetch them with
+`curl -C -` into the data dir first, then run with `--no-download` (see [Run](#run)).
+
+### Automated monthly refresh — the same pattern as the Tesla Superchargers
+
+The update path is a **drop-in analog of sota-wfs's supercharger fetch** — same
+fetch-script + `systemd`-timer + atomic-swap shape:
+
+| Superchargers (sota-wfs) | RF sources (this repo) |
+|---|---|
+| `fetch/fetch_superchargers.py` | `fetch/fetch_rf_sources.py` |
+| `systemd/fetch-superchargers.timer` (weekly) | `systemd/fetch-rf-sources.timer` (monthly) |
+| download → validate → atomic swap into `data/` | same, with a full rebuild in between |
+
+`fetch/fetch_rf_sources.py` downloads (conditionally, below), reruns the pipeline,
+and atomically swaps `data/rf_summits.geojson` into place; the WFS server's 15 s
+mtime hot-reload serves it with no restart. Enable it exactly like the supercharger
+timer:
+
+```
+systemctl --user enable --now fetch-rf-sources.timer
+```
+
+Full deploy steps (loader + registry wiring, deps, the CalTopo layer URL) are in
+[DEPLOY_SOTA_WFS.md](DEPLOY_SOTA_WFS.md).
+
+### What actually re-downloads each month
+
+- **CDBS broadcast** — never (frozen; fetched once, then skipped).
+- **ULS / ASR completes** — only when FCC's copy is newer than the local one
+  (`curl -z` / HTTP `Last-Modified` conditional GET), resumably (`curl -C -`).
+
+So a month with no FCC change pulls ~nothing; a month with a change re-fetches only
+the changed complete files. (True per-record deltas from FCC's *daily transaction*
+files would need a persistent datastore — a possible future upgrade, not needed at
+monthly cadence.)
+
 ## Output
 
 Three files, prefixed by the association (or `US`):
@@ -86,12 +138,13 @@ What this captures well:
 - Land-mobile transmitters with real frequency + ERP (public-safety repeaters,
   business radio — the bulk of mountaintop two-way activity).
 
-What it doesn't yet include (straightforward future layers):
-- **Microwave point-to-point** — `l_micro.zip` uses the *same* HD/EN/LO/FR record
-  layout, so it's a drop-in: add the URL to the `uls` list in the script.
-- **Broadcast FM / TV / AM** — these live in the FCC LMS/media dataset (a
-  different schema), not ULS. They're often the highest-ERP offenders on summits
-  like Diablo or San Bruno, so worth adding as a dedicated loader next.
+Also included now (beyond the two core layers above):
+- **Microwave point-to-point** — `l_micro.zip`, sharing the ULS HD/EN/LO/FR
+  layout; adds 6/11/18 GHz backhaul/STL paths (frequency + location, no power).
+- **Broadcast FM / TV / AM** — from the FCC CDBS media dataset; usually the
+  highest-ERP offenders on summits like Diablo or San Bruno.
+
+Still not included:
 - **Cellular** — licensed by geographic area, so exact site coordinates aren't in
   ULS. The physical towers still show up via ASR.
 
