@@ -52,7 +52,8 @@ If your environment can't reach the FCC / SOTA hosts, download the files yoursel
 
 Useful flags: `--radius` (base radius, metres), `--no-uls` (structures only),
 `--no-broadcast` (skip FM/TV/AM), `--no-download` (use cached files in
-`--data-dir`), `--broadcast-dir`, `--out-dir`.
+`--data-dir`), `--broadcast-dir`, `--out-dir`,
+`--report W6/CC-072` (also write a standalone HTML report card for one summit).
 
 ## Data & updates
 
@@ -140,6 +141,11 @@ Files prefixed by the association (or `US`):
   served live over WFS (see [DEPLOY_SOTA_WFS.md](DEPLOY_SOTA_WFS.md)).
 - **`<ASSOC>_sources_caltopo.geojson`** — one pin per individual source, `marker-color`
   by ERP. Large nationally (~60k points) — best served over WFS/bbox, not imported.
+- **`<CODE>_report.html`** *(only with `--report`)* — a standalone, self-contained
+  **report card** for one summit: the spectrum (band-power bars + every individual
+  emitter as a dot + per-ham-band overload markers) and a scrollable table of all
+  sources. This is the browser deep-dive companion CalTopo can't host; open it in
+  any browser. Rendered from `report_template.html`.
 
 CalTopo popups are plain text (no HTML/images/links), so the analysis rides in the
 feature's `title` (the SOTA code) + `description`, and severity in `marker-color`;

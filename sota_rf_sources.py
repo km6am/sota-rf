@@ -242,6 +242,7 @@ def load_summits(path, prefixes):
             region=(r.get("RegionName") or "").strip(),
             alt_m=to_float(r.get("AltM")),
             points=to_float(r.get("Points")),
+            activations=to_float(r.get("ActivationCount")),
             lat=lat, lon=lon,
         ))
     df = pd.DataFrame(rows)
@@ -886,6 +887,104 @@ def to_caltopo_sources(joined, path):
 
 
 # --------------------------------------------------------------------------- #
+# Per-summit RF report card (standalone HTML; the browser companion CalTopo
+# can't host). Renders the same analysis as the CalTopo popup, plus a spectrum
+# with per-emitter scatter and a scrollable source table, from report_template.html.
+# --------------------------------------------------------------------------- #
+_HAM_RANGE = {"40m": (7, 7.3), "20m": (14, 14.35), "6m": (50, 54),
+              "2m": (144, 148), "70cm": (420, 450), "23cm": (1240, 1300)}
+_TIER_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "clear", "CLEAR": "clear"}
+_OVERALL_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "low", "CLEAR": "clear"}
+
+
+def _report_data(joined, summits, code, base_radius=1000.0):
+    """Assemble the DATA dict the report template renders for one summit."""
+    d = joined[joined["summit"] == code]
+    if d.empty:
+        raise ValueError(f"no in-range sources for summit {code!r}")
+    mrow = summits[summits["summit"] == code]
+    meta = mrow.iloc[0] if len(mrow) else None
+
+    scatter, barp = [], {}                       # barp: label -> [power, lo, hi]
+    recv = {b: 0.0 for b, _ in HAM_BANDS}
+    loud = {b: (-1.0, None) for b, _ in HAM_BANDS}   # b -> (best ERP/d², (power, dist))
+    n_bcast = n_lm = n_uw = 0
+    emitters = []
+    for r in d.itertuples(index=False):
+        p = None if pd.isna(r.rf_max_power_w) else float(r.rf_max_power_w)
+        fs = []
+        for tok in str(r.rf_freqs_mhz).split(";"):
+            try:
+                f = float(tok)
+            except ValueError:
+                continue
+            if not np.isnan(f):
+                fs.append(f)
+        if r.rf_source_db in ("FM", "TV", "AM"):
+            n_bcast += 1
+        elif fs and min(fs) >= 960:
+            n_uw += 1
+        else:
+            n_lm += 1
+        if p is not None:
+            for f in fs:
+                if 0.4 < f <= 1000:
+                    scatter.append([round(f, 4), int(round(p))])
+            hit = {(lbl, lo, hi) for f in fs for lbl, lo, hi in SERVICE_BANDS
+                   if lo <= f < hi and lo < 1000}
+            for lbl, lo, hi in hit:
+                barp.setdefault(lbl, [0.0, lo, min(hi, 1000)])[0] += p
+            dist = max(r.distance_m, 10.0)
+            for f in fs:
+                for hb, fc in HAM_BANDS:
+                    if 0.5 * fc <= f <= 2 * fc:
+                        rv = p / (dist * dist)
+                        recv[hb] += rv
+                        if rv > loud[hb][0]:
+                            loud[hb] = (rv, (p, r.distance_m))
+        fsum = "" if not fs else (f"{fs[0]:g}" if len(fs) == 1
+                                  else f"{min(fs):g}–{max(fs):g} ({len(fs)})")
+        emitters.append(dict(owner=str(r.rf_owner)[:40], svc=str(r.rf_services)[:16],
+                             f=fsum, p=p, d=float(r.distance_m),
+                             far=bool(r.distance_m > base_radius)))
+    emitters.sort(key=lambda e: (-(e["p"] if e["p"] is not None else -1.0), e["d"]))
+
+    ham = []
+    for hb, fc in HAM_BANDS:
+        tier = _risk_tier(recv[hb])
+        why = ""
+        if tier in ("HIGH", "MODERATE") and loud[hb][1]:
+            pw, ds = loud[hb][1]
+            why = f"{human_w(pw)} @ {int(ds)} m"
+        lo, hi = _HAM_RANGE[hb]
+        ham.append(dict(b=hb, lo=lo, hi=hi, fc=fc, lvl=_TIER_LVL[tier], why=why))
+    overall = _OVERALL_LVL[max((_risk_tier(recv[hb]) for hb, _ in HAM_BANDS), key=RISK_ORDER.index)]
+    pw = d["rf_max_power_w"]
+    total = float(pw.sum(min_count=1)) if pw.notna().any() else None
+
+    def _m(col):
+        return None if meta is None or col not in meta or pd.isna(meta[col]) else meta[col]
+    return dict(
+        code=code, name=(str(_m("name")) if _m("name") is not None else code),
+        alt_m=(None if _m("alt_m") is None else float(_m("alt_m"))),
+        activations=(None if _m("activations") is None else int(_m("activations"))),
+        total_erp_w=total, overall=overall, n=len(d),
+        n_bcast=n_bcast, n_lm=n_lm, n_uw=n_uw,
+        bands=[dict(label=l, lo=lo, hi=hi, p=p) for l, (p, lo, hi) in barp.items()],
+        scatter=scatter, ham=ham, emitters=emitters)
+
+
+def write_report_card(joined, summits, code, out_path, base_radius=1000.0, template=None):
+    tpl = template or os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_template.html")
+    data = _report_data(joined, summits, code, base_radius)
+    with open(tpl, encoding="utf-8") as f:
+        html = f.read()
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html.replace("/*REPORT_DATA*/", json.dumps(data)))
+    return out_path
+
+
+# --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -906,6 +1005,9 @@ def main():
                     help="ASR structures only (skip the frequency/power layer)")
     ap.add_argument("--no-broadcast", action="store_true",
                     help="skip the FM/TV/AM broadcast layer (CDBS media files)")
+    ap.add_argument("--report", metavar="SUMMIT",
+                    help="also write a standalone HTML report card for this summit "
+                         "code (e.g. W6/CC-072) to the output dir")
     ap.add_argument("--broadcast-dir",
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
@@ -978,6 +1080,16 @@ def main():
     n_ct_sum = to_caltopo_summits(summary, joined, p_ct_sum, args.radius) if len(joined) else 0
     n_ct_src = to_caltopo_sources(joined, p_ct_src) if len(joined) else 0
 
+    p_report = None
+    if args.report:
+        try:
+            p_report = write_report_card(
+                joined, summits, args.report,
+                os.path.join(args.out_dir, args.report.replace("/", "_") + "_report.html"),
+                args.radius)
+        except ValueError as e:
+            log(f"  report: {e}")
+
     log("\n=== done ===")
     log(f"summits processed : {len(summits)}")
     log(f"RF sources in DB   : {len(rf)}  (ASR {len(asr) if asr is not None else 0}"
@@ -996,6 +1108,8 @@ def main():
     log(f"\nwrote:\n  {p_join}\n  {p_sum}\n  {p_geo}")
     log(f"  {p_ct_sum}  ({n_ct_sum} summit-risk points, CalTopo)")
     log(f"  {p_ct_src}  ({n_ct_src} source points, CalTopo)")
+    if p_report:
+        log(f"  {p_report}  (report card for {args.report})")
 
 
 if __name__ == "__main__":

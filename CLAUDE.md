@@ -195,9 +195,11 @@ the end), but the indices above are verified against the real files.
      `systemd/fetch-rf-sources.{service,timer}` (monthly `oneshot`), and
      `DEPLOY_SOTA_WFS.md` (the `rf_geojson_loader` + `RF_Sources` `Layer` to add,
      deps, install). Download logic smoke-tested against live FCC.
-   - (b) a standalone **RF report-card** web page (spectrum + emitter scatter +
-     scrollable table — see the Artifact mockup) as the browser companion CalTopo
-     can't host; (c) tune risk thresholds / octave window with ground truth;
+   - (b) ~~standalone **RF report-card** web page~~ **DONE** — `write_report_card()`
+     + `--report <SUMMIT>` emit a self-contained per-summit HTML (spectrum:
+     band-power bars + per-emitter scatter + ham-band overload markers, plus a
+     scrollable source table) from `report_template.html`. The browser deep-dive
+     CalTopo can't host. (c) tune risk thresholds / octave window with ground truth;
      (d) true per-record delta updates (FCC daily transaction files → a
      persistent datastore) if the monthly full pull is too heavy.
 
