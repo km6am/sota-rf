@@ -53,7 +53,9 @@ If your environment can't reach the FCC / SOTA hosts, download the files yoursel
 Useful flags: `--radius` (base radius, metres), `--no-uls` (structures only),
 `--no-broadcast` (skip FM/TV/AM), `--no-download` (use cached files in
 `--data-dir`), `--broadcast-dir`, `--out-dir`,
-`--report W6/CC-072` (also write a standalone HTML report card for one summit).
+`--report W6/CC-072` (write one summit's report card), `--reports-dir DIR`
+(batch: a report card per impacted summit into `DIR/reports/` + a compact
+`DIR/qrm_index.json` for a host page to merge in).
 
 ## Data & updates
 

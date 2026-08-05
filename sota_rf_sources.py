@@ -959,13 +959,9 @@ _TIER_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "clear", "CLEAR": "cl
 _OVERALL_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "low", "CLEAR": "clear"}
 
 
-def _report_data(joined, summits, code, base_radius=1000.0):
-    """Assemble the DATA dict the report template renders for one summit."""
-    d = joined[joined["summit"] == code]
-    if d.empty:
-        raise ValueError(f"no in-range sources for summit {code!r}")
-    mrow = summits[summits["summit"] == code]
-    meta = mrow.iloc[0] if len(mrow) else None
+def _report_data(d, meta, code, base_radius=1000.0):
+    """Assemble the DATA dict the report template renders for one summit.
+    `d` = that summit's join rows; `meta` = its summit meta row (or None)."""
 
     scatter, barp = [], {}                       # barp: label -> [power, lo, hi]
     recv = {b: 0.0 for b, _ in HAM_BANDS}
@@ -1036,17 +1032,77 @@ def _report_data(joined, summits, code, base_radius=1000.0):
         scatter=scatter, ham=ham, emitters=emitters)
 
 
-def write_report_card(joined, summits, code, out_path, base_radius=1000.0,
-                      template=None, provenance=None):
-    tpl = template or os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_template.html")
-    data = _report_data(joined, summits, code, base_radius)
+_REPORT_TPL = None
+
+
+def _report_template(path=None):
+    global _REPORT_TPL
+    if _REPORT_TPL is None or path:
+        p = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_template.html")
+        with open(p, encoding="utf-8") as f:
+            _REPORT_TPL = f.read()
+    return _REPORT_TPL
+
+
+def _emit_report(data, out_path, provenance=None, template=None):
     data["provenance"] = [{"label": l, "date": d} for l, d in (provenance or [])]
     data["generated"] = datetime.date.today().isoformat()
-    with open(tpl, encoding="utf-8") as f:
-        html = f.read()
+    html = _report_template(template).replace("/*REPORT_DATA*/", json.dumps(data))
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(html.replace("/*REPORT_DATA*/", json.dumps(data)))
+        f.write(html)
     return out_path
+
+
+def write_report_card(joined, summits, code, out_path, base_radius=1000.0,
+                      template=None, provenance=None):
+    d = joined[joined["summit"] == code]
+    if d.empty:
+        raise ValueError(f"no in-range sources for summit {code!r}")
+    mrow = summits[summits["summit"] == code]
+    meta = mrow.iloc[0] if len(mrow) else None
+    return _emit_report(_report_data(d, meta, code, base_radius), out_path, provenance, template)
+
+
+def _qrm(data):
+    """Level-grouped QRM summary from a report's ham data:
+    'High: 2m, 70cm · Moderate: 6m' + structured {high:[...], moderate:[...]}."""
+    high = [h["b"] for h in data["ham"] if h["lvl"] == "high"]
+    mod = [h["b"] for h in data["ham"] if h["lvl"] == "caution"]
+    parts = []
+    if high:
+        parts.append("High: " + ", ".join(high))
+    if mod:
+        parts.append("Moderate: " + ", ".join(mod))
+    return dict(text=(" · ".join(parts) if parts else "Clear"),
+                levels={"high": high, "moderate": mod})
+
+
+def write_report_bundle(joined, summits, out_dir, base_radius=1000.0, provenance=None):
+    """Batch: one report card per impacted summit into out_dir/reports/, plus a
+    compact out_dir/qrm_index.json (risk, QRM summary, report link) for a host
+    page (e.g. the SOTA propagation map) to merge in."""
+    reports_dir = os.path.join(out_dir, "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    meta_by = summits.set_index("summit")
+    index, n = {}, 0
+    for code, d in joined.groupby("summit"):
+        meta = meta_by.loc[code] if code in meta_by.index else None
+        if meta is not None and getattr(meta, "ndim", 1) > 1:   # dup codes -> first
+            meta = meta.iloc[0]
+        data = _report_data(d, meta, code, base_radius)
+        fname = code.replace("/", "_") + "_report.html"
+        _emit_report(data, os.path.join(reports_dir, fname), provenance)
+        q = _qrm(data)
+        risk = {"high": "HIGH", "caution": "MODERATE", "low": "LOW", "clear": "CLEAR"}[data["overall"]]
+        index[code] = dict(name=data["name"], risk=risk,
+                           qrm=q["text"], qrm_levels=q["levels"],
+                           total_erp_w=data["total_erp_w"], report="reports/" + fname)
+        n += 1
+    with open(os.path.join(out_dir, "qrm_index.json"), "w", encoding="utf-8") as f:
+        json.dump({"generated": datetime.date.today().isoformat(),
+                   "provenance": [{"label": l, "date": d} for l, d in (provenance or [])],
+                   "count": n, "summits": index}, f)
+    return n
 
 
 # --------------------------------------------------------------------------- #
@@ -1073,6 +1129,9 @@ def main():
     ap.add_argument("--report", metavar="SUMMIT",
                     help="also write a standalone HTML report card for this summit "
                          "code (e.g. W6/CC-072) to the output dir")
+    ap.add_argument("--reports-dir", metavar="DIR",
+                    help="batch: write a report card per impacted summit into "
+                         "DIR/reports/ plus DIR/qrm_index.json (for hosting)")
     ap.add_argument("--broadcast-dir",
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
@@ -1156,6 +1215,11 @@ def main():
                 args.radius, provenance=prov)
         except ValueError as e:
             log(f"  report: {e}")
+
+    n_bundle = 0
+    if args.reports_dir and len(joined):
+        n_bundle = write_report_bundle(joined, summits, args.reports_dir, args.radius, prov)
+        log(f"  report bundle: {n_bundle} cards + qrm_index.json -> {args.reports_dir}")
 
     log("\n=== done ===")
     if prov:
