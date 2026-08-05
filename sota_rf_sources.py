@@ -705,7 +705,8 @@ def to_geojson(joined, path):
 # free-space fields), computed per ham band over sources within a ±octave window
 # (0.5×–2× the centre) and over ALL sources for the summit's overall/broadband
 # level. Tiers are in V/m, so they mean something an RF person can sanity-check.
-HAM_BANDS = [("40m", 7.15), ("20m", 14.2), ("6m", 52),
+HAM_BANDS = [("40m", 7.15), ("30m", 10.125), ("20m", 14.2), ("17m", 18.118),
+             ("15m", 21.225), ("12m", 24.94), ("10m", 28.85), ("6m", 52),
              ("2m", 146), ("70cm", 435), ("23cm", 1270)]
 RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
 # Field-strength tier thresholds (V/m). Calibrated to ground truth: a summit
@@ -975,8 +976,10 @@ def to_caltopo_sources(joined, path):
 # can't host). Renders the same analysis as the CalTopo popup, plus a spectrum
 # with per-emitter scatter and a scrollable source table, from report_template.html.
 # --------------------------------------------------------------------------- #
-_HAM_RANGE = {"40m": (7, 7.3), "20m": (14, 14.35), "6m": (50, 54),
-              "2m": (144, 148), "70cm": (420, 450), "23cm": (1240, 1300)}
+_HAM_RANGE = {"40m": (7, 7.3), "30m": (10.1, 10.15), "20m": (14, 14.35),
+              "17m": (18.068, 18.168), "15m": (21.0, 21.45), "12m": (24.89, 24.99),
+              "10m": (28.0, 29.7), "6m": (50, 54), "2m": (144, 148),
+              "70cm": (420, 450), "23cm": (1240, 1300)}
 _TIER_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "clear", "CLEAR": "clear"}
 _OVERALL_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "low", "CLEAR": "clear"}
 
