@@ -42,7 +42,11 @@ REPORT_BASE = os.environ.get("SOTA_RF_REPORT_BASE")
 MIN_FEATURES = 100
 
 # (url, filename, frozen). Frozen CDBS files never change → fetch once, then skip.
+# The SOTA summit list rides along here too (not FCC, but the same conditional-GET
+# cache): the pipeline runs --no-download and reads summitslist.csv straight from
+# this dir, so it MUST be fetched here or load_summits gets a None path.
 FCC_FILES = [
+    ("https://www.sotadata.org.uk/summitslist.csv",                "summitslist.csv", False),
     ("https://data.fcc.gov/download/pub/uls/complete/r_tower.zip",  "r_tower.zip",  False),
     ("https://data.fcc.gov/download/pub/uls/complete/l_LMcomm.zip", "l_LMcomm.zip", False),
     ("https://data.fcc.gov/download/pub/uls/complete/l_LMpriv.zip", "l_LMpriv.zip", False),
