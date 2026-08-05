@@ -57,7 +57,7 @@
   #spectrum{width:100%;height:auto;display:block;}
   .legend{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:10px;font-size:12px;color:var(--muted);}
   .legend .item{display:inline-flex;align-items:center;gap:7px;}
-  .legend .swatch{width:14px;height:9px;border-radius:2px;background:var(--bar);}
+  .legend .swatch{width:36px;height:9px;border-radius:2px;background:var(--ramp,var(--bar));}
   .legend .swatch.dot{width:8px;height:8px;border-radius:50%;background:rgba(var(--dot),.5);}
   .legend .swatch.band{width:0;height:13px;border-left:1px dashed var(--faint);border-radius:0;}
 
@@ -93,7 +93,7 @@
   <h2 class="sec">Spectrum <span class="count">band power &amp; individual emitters, 0.5&nbsp;MHz&ndash;1&nbsp;GHz</span></h2>
   <svg id="spectrum" viewBox="0 0 900 300" role="img" aria-label="RF spectrum for this summit"></svg>
   <div class="legend">
-    <span class="item"><span class="swatch"></span> band ERP</span>
+    <span class="item"><span class="swatch"></span> band ERP&nbsp; 100&nbsp;W&ndash;1&nbsp;MW</span>
     <span class="item"><span class="swatch dot"></span> individual emitter</span>
     <span class="item"><span class="swatch band"></span> amateur band</span>
   </div>
@@ -124,9 +124,17 @@ const DATA = /*REPORT_DATA*/;
   const css=k=>getComputedStyle(document.documentElement).getPropertyValue(k).trim();
   const human=w=>w==null?"—":w>=1e6?(w/1e6).toFixed(2)+" MW":w>=1e3?Math.round(w/1e3)+" kW":Math.round(w)+" W";
   const cleanF=f=>(!f||f==="nan")?"—":f;
+  // restrained thermal ramp keyed to the risk palette (slate -> amber -> brick),
+  // so power reads as heat without the neon look.
+  const isDark=()=>{const t=document.documentElement.getAttribute("data-theme");return t?t==="dark":matchMedia("(prefers-color-scheme: dark)").matches;};
+  const RL=[[0,[112,137,163]],[0.5,[193,133,43]],[1,[192,68,46]]];
+  const RD=[[0,[128,147,168]],[0.5,[210,154,73]],[1,[217,105,79]]];
+  const pt=p=>Math.min(1,Math.max(0,(Math.log10(Math.max(p,1))-2)/4));   // 100 W..1 MW
+  function heat(t){const S=isDark()?RD:RL;for(let i=1;i<S.length;i++)if(t<=S[i][0]){const[a,ca]=S[i-1],[b,cb]=S[i],u=(t-a)/(b-a||1);return`rgb(${ca.map((v,j)=>Math.round(v+(cb[j]-v)*u)).join(",")})`;}return`rgb(${S[S.length-1][1].join(",")})`;}
+  function setRamp(){document.documentElement.style.setProperty("--ramp",`linear-gradient(90deg,${heat(0)},${heat(0.5)},${heat(1)})`);}
 
   function draw(){
-    svg.textContent="";
+    svg.textContent=""; setRamp();
     const bar=css("--bar"),ink=css("--ink"),muted=css("--muted"),faint=css("--faint"),line=css("--line"),dot=css("--dot");
     // horizontal power gridlines (quiet)
     [[100,"100 W"],[1e3,"1 kW"],[1e4,"10 kW"],[1e5,"100 kW"],[1e6,"1 MW"]].forEach(([p,lab])=>{
@@ -147,7 +155,7 @@ const DATA = /*REPORT_DATA*/;
     (DATA.bands||[]).forEach(bd=>{
       if(!(bd.p>0)) return;
       const xa=fx(Math.max(bd.lo,FMIN)),xb=fx(Math.min(bd.hi,FMAX)),w=Math.max(xb-xa,2.5),yTop=py(bd.p);
-      svg.appendChild(el("rect",{x:xa,y:yTop,width:w,height:y0-yTop,rx:1.5,fill:bar,opacity:.5}));
+      svg.appendChild(el("rect",{x:xa,y:yTop,width:w,height:y0-yTop,rx:1.5,fill:heat(pt(bd.p)),opacity:.82}));
     });
     // individual emitters
     (DATA.scatter||[]).forEach(([f,p])=>{
