@@ -201,25 +201,65 @@ def _xesc(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-def capabilities_xml(version, base):
+def capabilities_110(base):
+    """WFS 1.1.0 GetCapabilities — the ONLY version CalTopo's Auto-Configure
+    parses, and only in GeoServer's dialect. The quirks below were reverse-
+    engineered from CalTopo's parser (thanks km6am): 1.1 namespaces (wfs, ows —
+    NOT the 2.0/1.1.1 variants); FeatureType elements in the wfs namespace (via
+    the default xmlns); <DefaultSRS> (not DefaultCRS); <ows:Value> directly in
+    <ows:Parameter> with NO <ows:AllowedValues> wrapper; and GetFeature must
+    advertise resultType FIRST, outputFormat SECOND (CalTopo reads by position)."""
     wfs = f"{base}/geoserver/wfs"
     fts = ""
     for n in available():
         title, abstract, _ = LAYERS[n]
         fts += (f'<FeatureType><Name>{NS}:{n}</Name><Title>{_xesc(title)}</Title>'
                 f'<Abstract>{_xesc(abstract)}</Abstract>'
-                f'<DefaultCRS>urn:ogc:def:crs:EPSG::4326</DefaultCRS>'
-                f'<OutputFormats><Format>application/json</Format></OutputFormats>'
-                f'<ows:WGS84BoundingBox><ows:LowerCorner>-180 -90</ows:LowerCorner>'
-                f'<ows:UpperCorner>180 90</ows:UpperCorner></ows:WGS84BoundingBox></FeatureType>')
+                '<DefaultSRS>urn:ogc:def:crs:EPSG::4326</DefaultSRS>'
+                '<OutputFormats><Format>application/json</Format></OutputFormats>'
+                '<ows:WGS84BoundingBox><ows:LowerCorner>-180 -90</ows:LowerCorner>'
+                '<ows:UpperCorner>180 90</ows:UpperCorner></ows:WGS84BoundingBox></FeatureType>')
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        f'<wfs:WFS_Capabilities version="{version}" xmlns:wfs="http://www.opengis.net/wfs/2.0" '
+        '<wfs:WFS_Capabilities version="1.1.0" xmlns="http://www.opengis.net/wfs" '
+        'xmlns:wfs="http://www.opengis.net/wfs" xmlns:ows="http://www.opengis.net/ows" '
+        f'xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:{NS}="https://km6am.com/{NS}">'
+        '<ows:ServiceIdentification><ows:Title>SOTA RF WFS</ows:Title>'
+        '<ows:ServiceType>WFS</ows:ServiceType>'
+        '<ows:ServiceTypeVersion>1.1.0</ows:ServiceTypeVersion></ows:ServiceIdentification>'
+        '<ows:OperationsMetadata>'
+        f'<ows:Operation name="GetCapabilities"><ows:DCP><ows:HTTP>'
+        f'<ows:Get xlink:href="{wfs}?"/></ows:HTTP></ows:DCP></ows:Operation>'
+        f'<ows:Operation name="GetFeature"><ows:DCP><ows:HTTP>'
+        f'<ows:Get xlink:href="{wfs}?"/></ows:HTTP></ows:DCP>'
+        '<ows:Parameter name="resultType"><ows:Value>results</ows:Value>'
+        '<ows:Value>hits</ows:Value></ows:Parameter>'
+        '<ows:Parameter name="outputFormat"><ows:Value>application/json</ows:Value></ows:Parameter>'
+        '</ows:Operation></ows:OperationsMetadata>'
+        f'<wfs:FeatureTypeList>{fts}</wfs:FeatureTypeList>'
+        '</wfs:WFS_Capabilities>')
+
+
+def capabilities_200(base):
+    """WFS 2.0.0 GetCapabilities, for non-CalTopo clients that ask for 2.0."""
+    wfs = f"{base}/geoserver/wfs"
+    fts = ""
+    for n in available():
+        title, abstract, _ = LAYERS[n]
+        fts += (f'<wfs:FeatureType><wfs:Name>{NS}:{n}</wfs:Name><wfs:Title>{_xesc(title)}</wfs:Title>'
+                f'<wfs:Abstract>{_xesc(abstract)}</wfs:Abstract>'
+                '<wfs:DefaultCRS>urn:ogc:def:crs:EPSG::4326</wfs:DefaultCRS>'
+                '<wfs:OutputFormats><wfs:Format>application/json</wfs:Format></wfs:OutputFormats>'
+                '<ows:WGS84BoundingBox><ows:LowerCorner>-180 -90</ows:LowerCorner>'
+                '<ows:UpperCorner>180 90</ows:UpperCorner></ows:WGS84BoundingBox></wfs:FeatureType>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<wfs:WFS_Capabilities version="2.0.0" xmlns:wfs="http://www.opengis.net/wfs/2.0" '
         'xmlns:ows="http://www.opengis.net/ows/1.1" xmlns:xlink="http://www.w3.org/1999/xlink" '
         f'xmlns:{NS}="https://km6am.com/{NS}">'
         '<ows:ServiceIdentification><ows:Title>SOTA RF WFS</ows:Title>'
-        '<ows:ServiceType>WFS</ows:ServiceType><ows:ServiceTypeVersion>2.0.0</ows:ServiceTypeVersion>'
-        '</ows:ServiceIdentification>'
+        '<ows:ServiceType>WFS</ows:ServiceType>'
+        '<ows:ServiceTypeVersion>2.0.0</ows:ServiceTypeVersion></ows:ServiceIdentification>'
         '<ows:OperationsMetadata>'
         f'<ows:Operation name="GetCapabilities"><ows:DCP><ows:HTTP>'
         f'<ows:Get xlink:href="{wfs}?"/></ows:HTTP></ows:DCP></ows:Operation>'
@@ -232,18 +272,38 @@ def capabilities_xml(version, base):
         '</wfs:WFS_Capabilities>')
 
 
+def _feature_columns(name):
+    """Real property names served for a layer (union over the loaded features),
+    so DescribeFeatureType can enumerate them — CalTopo keys its field/label
+    handling off these, not off a lone the_geom."""
+    data = get_data(name)
+    keys, seen = [], set()
+    for p in (data["props"][:500] if data else []):
+        for k in p:
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return keys
+
+
 def describe_xml(name):
+    fields = "".join(
+        f'<xsd:element name="{_xesc(k)}" minOccurs="0" nillable="true" type="xsd:string"/>'
+        for k in _feature_columns(name))
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+        'xmlns:gml="http://www.opengis.net/gml" '
         f'xmlns:{NS}="https://km6am.com/{NS}" targetNamespace="https://km6am.com/{NS}" '
-        'elementFormDefault="qualified">'
-        f'<xsd:element name="{name}" type="{NS}:{name}Type"/>'
+        'elementFormDefault="qualified" version="1.0">'
+        '<xsd:import namespace="http://www.opengis.net/gml" '
+        'schemaLocation="http://schemas.opengis.net/gml/3.1.1/base/gml.xsd"/>'
+        f'<xsd:element name="{name}" type="{NS}:{name}Type" substitutionGroup="gml:_Feature"/>'
         f'<xsd:complexType name="{name}Type"><xsd:complexContent>'
         '<xsd:extension base="gml:AbstractFeatureType"><xsd:sequence>'
-        '<xsd:element name="the_geom" minOccurs="0" '
-        'type="gml:PointPropertyType"/></xsd:sequence></xsd:extension>'
-        '</xsd:complexContent></xsd:complexType></xsd:schema>')
+        f'{fields}'
+        '<xsd:element name="the_geom" minOccurs="0" nillable="true" type="gml:PointPropertyType"/>'
+        '</xsd:sequence></xsd:extension></xsd:complexContent></xsd:complexType></xsd:schema>')
 
 
 def exception_xml(code, text, locator=None):
@@ -282,8 +342,10 @@ def create_app():
         try:
             if req == "getcapabilities":
                 version = (params.get("version") or params.get("acceptversions", "").split(",")[0]
-                           or "2.0.0").strip()
-                return xml(capabilities_xml(version, base_url()))
+                           or "1.1.0").strip()
+                # CalTopo Auto-Configure always asks for 1.1.0 and parses only that.
+                return xml(capabilities_110(base_url()) if version.startswith("1.1")
+                           else capabilities_200(base_url()))
             if req == "describefeaturetype":
                 raw = params.get("typenames") or params.get("typename")
                 name = resolve(raw) if raw else (available() or [None])[0]
