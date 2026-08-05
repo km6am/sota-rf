@@ -713,6 +713,13 @@ RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
 # ringed by a broadcast farm a few km off (Occidental/Mt Wilson ≈ 10 V/m) reads
 # HIGH; co-sited masts read far higher; a quiet peak sits under ~1 V/m.
 FIELD_HIGH_VM, FIELD_MOD_VM, FIELD_LOW_VM = 10.0, 3.0, 1.0
+# Broadcast (FM/TV/AM) desenses a ham receiver worse per watt than land-mobile:
+# a continuous megawatt carrier, and cheap ham front-ends reject the FM/UHF-TV
+# bands poorly. So broadcast gets a coupling multiplier on its ERP/d² when
+# scoring overload — applied to BOTH the per-band field and the total (broadband)
+# field, so per-band stays ≤ overall. 9× power ≈ 3× field: a 500 kW FM farm ~1 km
+# off then reads MODERATE on 2m instead of a falsely-quiet LOW.
+BROADCAST_HAM_WEIGHT = 9.0
 RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
               "LOW": "#6da536", "CLEAR": "#4d7a20"}
 
@@ -841,7 +848,8 @@ def _summit_analysis(joined, base_radius=1000.0):
             p = r.rf_max_power_w
             if pd.isna(p):
                 continue
-            contrib = p / (max(r.distance_m, 10.0) ** 2)
+            w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
+            contrib = w * p / (max(r.distance_m, 10.0) ** 2)
             field_sum += contrib
             fs = []
             for tok in str(r.rf_freqs_mhz).split(";"):
@@ -1012,7 +1020,10 @@ def _report_data(d, meta, code, base_radius=1000.0):
             n_lm += 1
         if p is not None:
             dist = max(r.distance_m, 10.0)
-            field_sum += p / (dist * dist)
+            # broadcast desense weight (see BROADCAST_HAM_WEIGHT) — applied to the
+            # overload field only; the bars/scatter still show real (unweighted) ERP.
+            w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
+            field_sum += w * p / (dist * dist)
             for f in fs:
                 if 0.4 < f <= 1000:
                     scatter.append([round(f, 4), int(round(p))])
@@ -1020,7 +1031,7 @@ def _report_data(d, meta, code, base_radius=1000.0):
                    if lo <= f < hi and lo < 1000}
             for lbl, lo, hi in hit:
                 barp.setdefault(lbl, [0.0, lo, min(hi, 1000)])[0] += p
-            rv = p / (dist * dist)
+            rv = w * p / (dist * dist)
             hit_ham = {hb for f in fs for hb, fc in HAM_BANDS if 0.5 * fc <= f <= 2 * fc}
             if not fs and r.rf_source_db == "TV":     # blank-freq UHF-TV -> 70cm octave
                 hit_ham.add("70cm")
