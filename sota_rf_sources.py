@@ -848,6 +848,8 @@ def _summit_analysis(joined, base_radius=1000.0):
                 ub = unk[r.distance_m > base_radius]
                 ub[0] += p
                 ub[1] = r.distance_m if ub[1] is None else min(ub[1], r.distance_m)
+                if r.rf_source_db == "TV":        # UHF-TV (ch>36, freq blanked) radiates
+                    recv["70cm"] += contrib       # in the 70cm octave — score it there
         # cluster within each segment, keeping near and far sources separate so a
         # far mast isn't merged into (and hidden behind) a co-sited near source.
         bins = []
