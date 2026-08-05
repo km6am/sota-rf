@@ -36,6 +36,9 @@ DEST_SOURCES = DATA_DIR / "rf_sources.geojson"     # optional per-source layer
 # If set, per-summit report cards + qrm_index.json are (re)published here — e.g.
 # a static web docroot the propagation map serves (/opt/sota-matcher/web/rf).
 REPORTS_DIR = os.environ.get("SOTA_RF_REPORTS_DIR")
+# Public base URL where the report cards are hosted; adds a report link to each
+# CalTopo summit popup (e.g. https://km6am.com/rf).
+REPORT_BASE = os.environ.get("SOTA_RF_REPORT_BASE")
 MIN_FEATURES = 100
 
 # (url, filename, frozen). Frozen CDBS files never change → fetch once, then skip.
@@ -108,6 +111,8 @@ def main() -> int:
                "--no-download", "--data-dir", str(FCC_DIR), "--out-dir", str(staging)]
         if REPORTS_DIR:
             cmd += ["--reports-dir", str(staging / "bundle")]
+        if REPORT_BASE:
+            cmd += ["--report-base-url", REPORT_BASE]
         subprocess.run(cmd, check=True)
 
         tag = "US" if ASSOCIATION == "US" else ASSOCIATION.replace("/", "_")

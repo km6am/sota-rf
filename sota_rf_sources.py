@@ -856,59 +856,61 @@ def _summit_analysis(joined, base_radius=1000.0):
                 sub = sorted(it for it in items if (it[3] > base_radius) == far)
                 for lo, hi, w, dist in _cluster_freqs(sub):
                     bins.append((lo, hi, label, w, dist))
-        overall = max((_risk_tier(recv[hb]) for hb, _ in HAM_BANDS), key=RISK_ORDER.index)
+        ham_tiers = {hb: _risk_tier(recv[hb]) for hb, _ in HAM_BANDS}
+        overall = max(ham_tiers.values(), key=RISK_ORDER.index)
         pw = g["rf_max_power_w"]
         total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
-        info[summit] = dict(overall=overall, total=total, bins=bins, n=len(g),
+        info[summit] = dict(overall=overall, ham_tiers=ham_tiers, total=total, bins=bins, n=len(g),
                             unk_near=unk[False][0], unk_far=unk[True][0], unk_far_d=unk[True][1])
     return info
 
 
-def to_caltopo_summits(summary, joined, path, base_radius=1000.0):
+def _qrm_line(ham_tiers):
+    """Level-grouped ham-band QRM summary: 'High: 70cm · Moderate: 6m, 2m · Low: 23cm'."""
+    parts = []
+    for label, tier in (("High", "HIGH"), ("Moderate", "MODERATE"), ("Low", "LOW")):
+        bands = [b for b, _ in HAM_BANDS if ham_tiers[b] == tier]
+        if bands:
+            parts.append(f"{label}: {', '.join(bands)}")
+    return " · ".join(parts) if parts else "no ham-band QRM"
+
+
+def to_caltopo_summits(summary, joined, path, base_radius=1000.0, report_base=None):
     """One point per summit that has ≥1 source, coloured by overload risk. The
-    popup is terse: total ERP, then the ERP broken down by transmit band
-    (biggest first). A cluster whose nearest source is beyond `base_radius` (a
-    far high-ERP mast pulled in by the field-strength model) is tagged with its
-    distance, e.g. "(1.9km)". Directly importable into CalTopo."""
+    popup is a compact score-card — name, total ERP, the ham bands grouped by
+    QRM level (High/Moderate/Low), and a link to the full report card — with the
+    detailed by-band breakdown left to that report. `report_base` (e.g.
+    "https://km6am.com/rf") turns on the report link. Directly importable into
+    CalTopo, or served over WFS."""
     info = _summit_analysis(joined, base_radius)
     smeta = summary.set_index("summit")
     feats = []
     for code, d in info.items():
         s = smeta.loc[code]
-        # RF breakdown, biggest ERP first: tight frequency clusters at their real
-        # footprint, e.g. "151-159 MHz VHF  200 W". Clusters never span a ham
-        # band; a source inside one is labelled by the ham band (e.g. "2m").
-        rows = list(d["bins"])
-        if d["unk_near"] > 0:
-            rows.append((None, None, "unknown freq", d["unk_near"], None))
-        if d["unk_far"] > 0:
-            rows.append((None, None, "unknown freq", d["unk_far"], d["unk_far_d"]))
-        band_lines = []
-        for lo, hi, label, w, dist in sorted(rows, key=lambda t: -t[3]):
-            if lo is None:
-                head = label
-            elif round(lo) == round(hi):                       # single frequency
-                head = f"{_fmt_freq(lo)} {label}"
-            elif lo >= 1000:                                   # GHz range
-                head = f"{lo/1000:g}-{hi/1000:g} GHz {label}"
-            else:
-                head = f"{round(lo)}-{round(hi)} MHz {label}"
-            far = "" if (dist is None or dist <= base_radius) else f" ({dist/1000:.1f}km)"
-            band_lines.append(f"{head}  {human_w(w)}{far}")
-        desc = (f'{s["name"]}\n'
-                f'Total ERP  {human_w(d["total"])}\n'
-                + "\n".join(band_lines))
+        qrm = _qrm_line(d["ham_tiers"])
+        risk = {"HIGH": "High", "MODERATE": "Moderate", "LOW": "Low", "CLEAR": "Clear"}[d["overall"]]
+        report_url = (f'{report_base.rstrip("/")}/reports/{code.replace("/", "_")}_report.html'
+                      if report_base else None)
+        lines = [str(s["name"]),
+                 f'Risk: {risk}   Total ERP: {human_w(d["total"])}',
+                 f'QRM — {qrm}']
+        if report_url:
+            lines.append(f'Report: {report_url}')
+        props = {
+            "title": code,
+            "description": "\n".join(lines),
+            "risk": d["overall"],
+            "total_erp": human_w(d["total"]),
+            "qrm": qrm,
+            "marker-color": RISK_COLOR[d["overall"]],
+            "marker-symbol": "point",
+        }
+        if report_url:
+            props["report"] = report_url
         feats.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [round(s["lon"], 6), round(s["lat"], 6)]},
-            "properties": {
-                # Minimal props → a clean CalTopo tab. Label = compact SOTA code;
-                # the full name + band breakdown lives in the popup (comments).
-                "title": code,
-                "description": desc,
-                "marker-color": RISK_COLOR[d["overall"]],
-                "marker-symbol": "point",
-            },
+            "properties": props,
         })
     with open(path, "w") as f:
         json.dump({"type": "FeatureCollection", "features": feats}, f)
@@ -1132,6 +1134,10 @@ def main():
     ap.add_argument("--reports-dir", metavar="DIR",
                     help="batch: write a report card per impacted summit into "
                          "DIR/reports/ plus DIR/qrm_index.json (for hosting)")
+    ap.add_argument("--report-base-url", metavar="URL",
+                    help="base URL where report cards are hosted (e.g. "
+                         "https://km6am.com/rf); adds a report link to each "
+                         "CalTopo summit popup")
     ap.add_argument("--broadcast-dir",
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
@@ -1203,7 +1209,8 @@ def main():
     joined.to_csv(p_join, index=False)
     summary.to_csv(p_sum, index=False)
     n_geo = to_geojson(joined, p_geo) if len(joined) else 0
-    n_ct_sum = to_caltopo_summits(summary, joined, p_ct_sum, args.radius) if len(joined) else 0
+    n_ct_sum = to_caltopo_summits(summary, joined, p_ct_sum, args.radius,
+                                  args.report_base_url) if len(joined) else 0
     n_ct_src = to_caltopo_sources(joined, p_ct_src) if len(joined) else 0
 
     p_report = None
