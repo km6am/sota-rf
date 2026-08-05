@@ -148,7 +148,14 @@ the end), but the indices above are verified against the real files.
   LOW≥1 / CLEAR (`FIELD_*_VM`), calibrated to ground truth — Occidental Pk next
   to Mt Wilson (~15 MW a few km off) reads ~10 V/m = HIGH, not the false green a
   d²-only score gave it; blank-freq UHF-TV (ch>36) is scored in the 70cm octave.
-  Drives the **marker colour**.
+  **Broadcast desense weight (`BROADCAST_HAM_WEIGHT`=9):** FM/TV/AM ERP/d² is
+  multiplied by 9 (≈3× field) in the score — a continuous megawatt carrier
+  desenses cheap ham front-ends far worse per watt than land-mobile. Applied to
+  BOTH the per-band and total field (so per-band stays ≤ overall). Fixes a
+  false-quiet: Occidental's 418 kW FM 1.2 km off (on Mt Wilson) read LOW on
+  2m/6m; now MODERATE, matching real front-end overload from a broadcast farm a
+  km away — while co-sited FM summits (San Bruno) stay HIGH and the overall map
+  barely shifts. Drives the **marker colour**.
   CalTopo constraints discovered the hard way: (1) popups are **plain-text only**
   (no HTML/img/clickable links, per CalTopo's help forum), so the rich
   report-card mockup can't live *in* CalTopo — it's a browser companion; (2)
