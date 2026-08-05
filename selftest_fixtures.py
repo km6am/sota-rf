@@ -167,9 +167,11 @@ assert m.human_w(1_000_000) == "1.00 MW", m.human_w(1_000_000)
 assert m.human_w(45_000) == "45 kW", m.human_w(45_000)
 assert m.human_w(250) == "250 W", m.human_w(250)
 assert m.human_w(None) == "—" and m.human_w(float("nan")) == "—"
-# risk tiers calibrated to San Bruno's real scores (70cm 37.6, 2m 11.5, 23cm 1.5, clear 0)
-assert m._risk_tier(37.6) == "HIGH" and m._risk_tier(11.5) == "MODERATE"
-assert m._risk_tier(1.5) == "LOW" and m._risk_tier(0.0) == "CLEAR"
+# risk tiers now in field strength (V/m): HIGH>=10, MODERATE>=3, LOW>=1
+assert m._risk_tier(12) == "HIGH" and m._risk_tier(5) == "MODERATE"
+assert m._risk_tier(1.5) == "LOW" and m._risk_tier(0.5) == "CLEAR"
+# field helper: E = sqrt(30 * Sigma ERP/d^2); Occidental's ~3.57 -> ~10.3 V/m
+assert abs(m._field_vm(3.57) - 10.35) < 0.2, m._field_vm(3.57)
 # power->colour: no ERP is neutral grey; more power is redder (higher R channel)
 assert m.power_to_hex(None) == "#8a97a3", m.power_to_hex(None)
 assert m.power_to_hex(1_000_000)[1:3] > m.power_to_hex(200)[1:3], "1 MW should be redder than 200 W"

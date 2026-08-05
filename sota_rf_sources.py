@@ -700,13 +700,18 @@ def to_geojson(joined, path):
 # fields + a `description` blob, and severity is encoded as marker colour.
 # --------------------------------------------------------------------------- #
 
-# Ham bands an activator operates (MHz band-centre). "Risk" to each is a
-# front-end-overload proxy: Σ ERP_watts / dist_m² over powered sources whose
-# frequency lands within a ±octave window (0.5×–2× the centre). Thresholds are
-# heuristic, calibrated so the known-hot Bay Area masts read HIGH.
+# Ham bands an activator operates (MHz band-centre). Risk is an estimated
+# received field strength: E = √(30·Σ ERP_w/d_m²) V/m (incoherent sum of the
+# free-space fields), computed per ham band over sources within a ±octave window
+# (0.5×–2× the centre) and over ALL sources for the summit's overall/broadband
+# level. Tiers are in V/m, so they mean something an RF person can sanity-check.
 HAM_BANDS = [("40m", 7.15), ("20m", 14.2), ("6m", 52),
              ("2m", 146), ("70cm", 435), ("23cm", 1270)]
 RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
+# Field-strength tier thresholds (V/m). Calibrated to ground truth: a summit
+# ringed by a broadcast farm a few km off (Occidental/Mt Wilson ≈ 10 V/m) reads
+# HIGH; co-sited masts read far higher; a quiet peak sits under ~1 V/m.
+FIELD_HIGH_VM, FIELD_MOD_VM, FIELD_LOW_VM = 10.0, 3.0, 1.0
 RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
               "LOW": "#6da536", "CLEAR": "#4d7a20"}
 
@@ -777,10 +782,16 @@ def _cluster_freqs(items):
         yield emit(cluster)
 
 
-def _risk_tier(score):
-    if score >= 20:  return "HIGH"
-    if score >= 3:   return "MODERATE"
-    if score >= 0.3: return "LOW"
+def _field_vm(sum_erp_over_d2):
+    """Σ ERP/d² (W/m²-ish) -> estimated field strength E = √(30·Σ) in V/m."""
+    return (30.0 * sum_erp_over_d2) ** 0.5
+
+
+def _risk_tier(field_vm):
+    """Field strength (V/m) -> overload tier."""
+    if field_vm >= FIELD_HIGH_VM: return "HIGH"
+    if field_vm >= FIELD_MOD_VM:  return "MODERATE"
+    if field_vm >= FIELD_LOW_VM:  return "LOW"
     return "CLEAR"
 
 
@@ -821,7 +832,8 @@ def _summit_analysis(joined, base_radius=1000.0):
     per-ham-band risk tier, overall tier, total ERP, source counts, strongest."""
     info = {}
     for summit, g in joined.groupby("summit"):
-        recv = {b: 0.0 for b, _ in HAM_BANDS}   # ham-band overload score (drives colour)
+        recv = {b: 0.0 for b, _ in HAM_BANDS}   # per-ham-band Σ ERP/d² (in-octave)
+        field_sum = 0.0                         # Σ ERP/d² over ALL sources (broadband field)
         per_seg = {}                            # fixed (lo,hi,label) -> [(freq, src_id, power, dist)]
         unk = {False: [0.0, None], True: [0.0, None]}   # is_far -> [power, nearest_dist]
         for i, r in enumerate(g.itertuples(index=False)):
@@ -829,27 +841,30 @@ def _summit_analysis(joined, base_radius=1000.0):
             if pd.isna(p):
                 continue
             contrib = p / (max(r.distance_m, 10.0) ** 2)
-            placed = False
+            field_sum += contrib
+            fs = []
             for tok in str(r.rf_freqs_mhz).split(";"):
                 try:
                     f = float(tok)
                 except ValueError:
                     continue
-                if np.isnan(f):
-                    continue
-                for hb, fc in HAM_BANDS:
-                    if 0.5 * fc <= f <= 2 * fc:
-                        recv[hb] += contrib
+                if not np.isnan(f):
+                    fs.append(f)
+            # ham bands this source touches (once per source, not per frequency, so a
+            # multi-channel licence can't inflate a band's field above the total)
+            hit_ham = {hb for f in fs for hb, fc in HAM_BANDS if 0.5 * fc <= f <= 2 * fc}
+            for f in fs:
                 seg = _bin_of(f)
                 if seg:
                     per_seg.setdefault(seg, []).append((f, i, p, r.distance_m))
-                    placed = True
-            if not placed:                       # e.g. TV ch>36 with blank freq
+            if not fs:                           # e.g. TV ch>36 with blank freq
                 ub = unk[r.distance_m > base_radius]
                 ub[0] += p
                 ub[1] = r.distance_m if ub[1] is None else min(ub[1], r.distance_m)
-                if r.rf_source_db == "TV":        # UHF-TV (ch>36, freq blanked) radiates
-                    recv["70cm"] += contrib       # in the 70cm octave — score it there
+                if r.rf_source_db == "TV":        # UHF-TV (ch>36, freq blanked) -> 70cm octave
+                    hit_ham.add("70cm")
+            for hb in hit_ham:
+                recv[hb] += contrib
         # cluster within each segment, keeping near and far sources separate so a
         # far mast isn't merged into (and hidden behind) a co-sited near source.
         bins = []
@@ -858,11 +873,14 @@ def _summit_analysis(joined, base_radius=1000.0):
                 sub = sorted(it for it in items if (it[3] > base_radius) == far)
                 for lo, hi, w, dist in _cluster_freqs(sub):
                     bins.append((lo, hi, label, w, dist))
-        ham_tiers = {hb: _risk_tier(recv[hb]) for hb, _ in HAM_BANDS}
-        overall = max(ham_tiers.values(), key=RISK_ORDER.index)
+        # per-band tiers from in-octave field; overall from the total (broadband) field
+        ham_tiers = {hb: _risk_tier(_field_vm(recv[hb])) for hb, _ in HAM_BANDS}
+        field_vm = _field_vm(field_sum)
+        overall = _risk_tier(field_vm)
         pw = g["rf_max_power_w"]
         total = float(pw.sum(min_count=1)) if pw.notna().any() else float("nan")
-        info[summit] = dict(overall=overall, ham_tiers=ham_tiers, total=total, bins=bins, n=len(g),
+        info[summit] = dict(overall=overall, ham_tiers=ham_tiers, total=total,
+                            field_vm=field_vm, bins=bins, n=len(g),
                             unk_near=unk[False][0], unk_far=unk[True][0], unk_far_d=unk[True][1])
     return info
 
@@ -969,6 +987,7 @@ def _report_data(d, meta, code, base_radius=1000.0):
 
     scatter, barp = [], {}                       # barp: label -> [power, lo, hi]
     recv = {b: 0.0 for b, _ in HAM_BANDS}
+    field_sum = 0.0                              # Σ ERP/d² over all sources (broadband field)
     loud = {b: (-1.0, None) for b, _ in HAM_BANDS}   # b -> (best ERP/d², (power, dist))
     n_bcast = n_lm = n_uw = 0
     emitters = []
@@ -989,6 +1008,8 @@ def _report_data(d, meta, code, base_radius=1000.0):
         else:
             n_lm += 1
         if p is not None:
+            dist = max(r.distance_m, 10.0)
+            field_sum += p / (dist * dist)
             for f in fs:
                 if 0.4 < f <= 1000:
                     scatter.append([round(f, 4), int(round(p))])
@@ -996,14 +1017,14 @@ def _report_data(d, meta, code, base_radius=1000.0):
                    if lo <= f < hi and lo < 1000}
             for lbl, lo, hi in hit:
                 barp.setdefault(lbl, [0.0, lo, min(hi, 1000)])[0] += p
-            dist = max(r.distance_m, 10.0)
-            for f in fs:
-                for hb, fc in HAM_BANDS:
-                    if 0.5 * fc <= f <= 2 * fc:
-                        rv = p / (dist * dist)
-                        recv[hb] += rv
-                        if rv > loud[hb][0]:
-                            loud[hb] = (rv, (p, r.distance_m))
+            rv = p / (dist * dist)
+            hit_ham = {hb for f in fs for hb, fc in HAM_BANDS if 0.5 * fc <= f <= 2 * fc}
+            if not fs and r.rf_source_db == "TV":     # blank-freq UHF-TV -> 70cm octave
+                hit_ham.add("70cm")
+            for hb in hit_ham:                        # once per source per band
+                recv[hb] += rv
+                if rv > loud[hb][0]:
+                    loud[hb] = (rv, (p, r.distance_m))
         fsum = "" if not fs else (f"{fs[0]:g}" if len(fs) == 1
                                   else f"{min(fs):g}–{max(fs):g} ({len(fs)})")
         emitters.append(dict(owner=str(r.rf_owner)[:40], svc=str(r.rf_services)[:16],
@@ -1013,14 +1034,14 @@ def _report_data(d, meta, code, base_radius=1000.0):
 
     ham = []
     for hb, fc in HAM_BANDS:
-        tier = _risk_tier(recv[hb])
+        tier = _risk_tier(_field_vm(recv[hb]))
         why = ""
         if tier in ("HIGH", "MODERATE") and loud[hb][1]:
             pw, ds = loud[hb][1]
             why = f"{human_w(pw)} @ {int(ds)} m"
         lo, hi = _HAM_RANGE[hb]
         ham.append(dict(b=hb, lo=lo, hi=hi, fc=fc, lvl=_TIER_LVL[tier], why=why))
-    overall = _OVERALL_LVL[max((_risk_tier(recv[hb]) for hb, _ in HAM_BANDS), key=RISK_ORDER.index)]
+    overall = _OVERALL_LVL[_risk_tier(_field_vm(field_sum))]
     pw = d["rf_max_power_w"]
     total = float(pw.sum(min_count=1)) if pw.notna().any() else None
 

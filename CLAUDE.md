@@ -140,9 +140,15 @@ the end), but the indices above are verified against the real files.
   `to_caltopo_summits()` / `to_caltopo_sources()` emit direct-import simplestyle
   GeoJSON. Summit layer: 576 W6 summits (317 CLEAR · 101 MODERATE · 83 HIGH · 75
   LOW); the HIGH shortlist is the known-hot roster (San Miguel, Lukens, Cahto,
-  San Bruno, Fremont Pk, Shasta Bally, Mt Allison). Risk = per-ham-band
-  Σ ERP/d² within a ±octave window, tiers HIGH≥20 / MOD≥3 / LOW≥0.3 / CLEAR
-  (heuristic, calibrated to Bay Area masts) — drives the **marker colour** only.
+  San Bruno, Fremont Pk, Shasta Bally, Mt Allison). Risk = estimated **field
+  strength** `E = √(30·Σ ERP/d²)` V/m (incoherent free-space sum; counted once
+  per source per band, never per-frequency). The summit's **overall** tier uses
+  the total field over ALL sources (broadband front-end overload); each ham
+  band's QRM level uses the in-±octave field. Tiers in V/m: HIGH≥10 / MOD≥3 /
+  LOW≥1 / CLEAR (`FIELD_*_VM`), calibrated to ground truth — Occidental Pk next
+  to Mt Wilson (~15 MW a few km off) reads ~10 V/m = HIGH, not the false green a
+  d²-only score gave it; blank-freq UHF-TV (ch>36) is scored in the 70cm octave.
+  Drives the **marker colour**.
   CalTopo constraints discovered the hard way: (1) popups are **plain-text only**
   (no HTML/img/clickable links, per CalTopo's help forum), so the rich
   report-card mockup can't live *in* CalTopo — it's a browser companion; (2)
