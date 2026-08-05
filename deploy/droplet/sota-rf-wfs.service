@@ -1,0 +1,17 @@
+[Unit]
+Description=SOTA RF WFS server (CalTopo layers)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/sota-rf
+Environment=SOTA_RF_DATA=/opt/sota-rf/data
+Environment=SOTA_RF_PORT=8080
+ExecStart=/opt/sota-rf/.venv/bin/python wfs_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

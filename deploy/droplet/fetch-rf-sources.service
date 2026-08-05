@@ -1,0 +1,14 @@
+[Unit]
+Description=Rebuild SOTA RF layers + report cards from FCC data
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sota-rf
+Environment=SOTA_WFS_ROOT=/opt/sota-rf
+Environment=SOTA_RF_ASSOCIATION=US
+Environment=SOTA_RF_REPORTS_DIR=/opt/sota-matcher/web/rf
+ExecStart=/opt/sota-rf/.venv/bin/python fetch/fetch_rf_sources.py
+# National rebuild loads ~1.2M sources (uses swap on this box); be patient + gentle.
+TimeoutStartSec=6h
+Nice=15
+IOSchedulingClass=idle

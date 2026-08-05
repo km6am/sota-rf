@@ -33,6 +33,9 @@ ASSOCIATION = os.environ.get("SOTA_RF_ASSOCIATION", "US")
 
 DEST_SUMMITS = DATA_DIR / "rf_summits.geojson"     # the WFS layer (summit-risk)
 DEST_SOURCES = DATA_DIR / "rf_sources.geojson"     # optional per-source layer
+# If set, per-summit report cards + qrm_index.json are (re)published here — e.g.
+# a static web docroot the propagation map serves (/opt/sota-matcher/web/rf).
+REPORTS_DIR = os.environ.get("SOTA_RF_REPORTS_DIR")
 MIN_FEATURES = 100
 
 # (url, filename, frozen). Frozen CDBS files never change → fetch once, then skip.
@@ -101,9 +104,11 @@ def main() -> int:
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
         arg = "--us" if ASSOCIATION == "US" else f"--association={ASSOCIATION}"
-        subprocess.run([sys.executable, str(PIPELINE), arg, "--radius", "1000",
-                        "--no-download", "--data-dir", str(FCC_DIR), "--out-dir", str(staging)],
-                       check=True)
+        cmd = [sys.executable, str(PIPELINE), arg, "--radius", "1000",
+               "--no-download", "--data-dir", str(FCC_DIR), "--out-dir", str(staging)]
+        if REPORTS_DIR:
+            cmd += ["--reports-dir", str(staging / "bundle")]
+        subprocess.run(cmd, check=True)
 
         tag = "US" if ASSOCIATION == "US" else ASSOCIATION.replace("/", "_")
         built = staging / f"{tag}_summits_caltopo.geojson"
@@ -112,6 +117,11 @@ def main() -> int:
         src = staging / f"{tag}_sources_caltopo.geojson"
         if src.exists():
             os.replace(src, DEST_SOURCES)
+        # publish the report bundle (reports/ + qrm_index.json) into the web docroot
+        bundle = staging / "bundle"
+        if REPORTS_DIR and bundle.is_dir():
+            os.makedirs(REPORTS_DIR, exist_ok=True)
+            subprocess.run(["rsync", "-a", "--delete", str(bundle) + "/", REPORTS_DIR + "/"], check=True)
     except Exception as exc:
         print(f"fetch_rf_sources failed: {exc}", file=sys.stderr)
         return 1
