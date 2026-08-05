@@ -1035,16 +1035,18 @@ def _report_data(d, meta, code, base_radius=1000.0):
                              far=bool(r.distance_m > base_radius)))
     emitters.sort(key=lambda e: (-(e["p"] if e["p"] is not None else -1.0), e["d"]))
 
-    ham = []
+    ham, ham_tiers = [], {}
     for hb, fc in HAM_BANDS:
         tier = _risk_tier(_field_vm(recv[hb]))
+        ham_tiers[hb] = tier
         why = ""
         if tier in ("HIGH", "MODERATE") and loud[hb][1]:
             pw, ds = loud[hb][1]
             why = f"{human_w(pw)} @ {int(ds)} m"
         lo, hi = _HAM_RANGE[hb]
         ham.append(dict(b=hb, lo=lo, hi=hi, fc=fc, lvl=_TIER_LVL[tier], why=why))
-    overall = _OVERALL_LVL[_risk_tier(_field_vm(field_sum))]
+    overall_tier = _risk_tier(_field_vm(field_sum))
+    overall = _OVERALL_LVL[overall_tier]
     pw = d["rf_max_power_w"]
     total = float(pw.sum(min_count=1)) if pw.notna().any() else None
 
@@ -1054,6 +1056,7 @@ def _report_data(d, meta, code, base_radius=1000.0):
         code=code, name=(str(_m("name")) if _m("name") is not None else code),
         alt_m=(None if _m("alt_m") is None else float(_m("alt_m"))),
         activations=(None if _m("activations") is None else int(_m("activations"))),
+        risk=overall_tier, qrm=_qrm_line(ham_tiers), field_vm=round(_field_vm(field_sum), 1),
         total_erp_w=total, overall=overall, n=len(d),
         n_bcast=n_bcast, n_lm=n_lm, n_uw=n_uw,
         bands=[dict(label=l, lo=lo, hi=hi, p=p) for l, (p, lo, hi) in barp.items()],
