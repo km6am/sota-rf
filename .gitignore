@@ -1,6 +1,7 @@
 # downloaded FCC/SOTA data and generated outputs
 fccdata/
 testout/
+testout_us/
 fixtures/
 *.zip
 summitslist.csv
