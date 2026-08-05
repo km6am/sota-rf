@@ -87,10 +87,26 @@ systemctl --user daemon-reload
 systemctl --user enable --now fetch-rf-sources.timer
 ```
 
-## 6. Add to CalTopo (same as the other layers)
-`Add → WFS Source → URL Template`, label `title` (the SOTA code):
+## 6. Add to CalTopo
+
+**Auto-Configure** (`Add → WFS Source → Auto-Configure URL`): paste the **bare
+endpoint**, nothing after it —
 ```
-https://<your-ngrok-domain>/geoserver/wfs?SERVICE=WFS&VERSION=1.1.0&REQUEST=GetFeature&BBOX={bottom},{left},{top},{right}&OUTPUTFORMAT=application/json&TYPENAMES=sota:RF_Sources
+https://<host>/geoserver/wfs
+```
+CalTopo appends `?SERVICE=WFS&VERSION=1.1.0&REQUEST=GetCapabilities` itself, so a
+URL that already has a query string produces a mangled double-`?` request. It
+parses **only WFS 1.1.0 in GeoServer's dialect** — the `wfs_server.py`
+capabilities are shaped for exactly that (`capabilities_110`); a stock 2.0 doc
+or a relabelled one makes it fail with a generic 500 / "Unable to auto configure".
+
+Then pick the layer (`rf:Summits` — the summit score-cards; `rf:Sources` for
+every transmitter) and set the label to `title`.
+
+**URL Template** (`Add → WFS Source → URL Template`), if you prefer explicit
+control — full GetFeature URL, label `title`:
+```
+https://<host>/geoserver/wfs?SERVICE=WFS&VERSION=1.1.0&REQUEST=GetFeature&BBOX={bottom},{left},{top},{right}&OUTPUTFORMAT=application/json&TYPENAMES=rf:Summits
 ```
 
 ## Notes / caveats
