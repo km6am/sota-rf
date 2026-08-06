@@ -117,6 +117,12 @@ def main() -> int:
             cmd += ["--reports-dir", str(staging / "bundle")]
         if REPORT_BASE:
             cmd += ["--report-base-url", REPORT_BASE]
+        # Terrain diffraction cache (built off-box where the DEM lives, shipped
+        # into data/). Read-only here — no --dem-dir, so uncached pairs assume
+        # clear LOS. Missing file just means terrain is skipped this run.
+        tcache = DATA_DIR / "terrain_cache.json"
+        if tcache.exists():
+            cmd += ["--terrain-cache", str(tcache)]
         subprocess.run(cmd, check=True)
 
         tag = "US" if ASSOCIATION == "US" else ASSOCIATION.replace("/", "_")

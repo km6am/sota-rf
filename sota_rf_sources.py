@@ -733,6 +733,7 @@ def apply_terrain(joined, dem_dir=None, cache_path=None, base_radius=1000.0):
     joined = joined.copy()
     joined["terrain_loss_db"] = loss
     if cache_path and new:
+        os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
         tmp = cache_path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(cache, f)
