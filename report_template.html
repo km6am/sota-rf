@@ -37,7 +37,7 @@
   .scorecard{margin-top:26px;padding-top:22px;border-top:1px solid var(--line-strong);
              display:grid;grid-template-columns:auto auto 1fr;gap:26px 34px;align-items:end;}
   .stat .k{font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;}
-  .stat .v{font-size:22px;font-weight:600;letter-spacing:-.01em;}
+  .stat .v{font-size:22px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;}
   .risk-word{display:inline-flex;align-items:center;gap:8px;}
   .risk-word::before{content:"";width:9px;height:9px;border-radius:50%;background:currentColor;}
   .risk-high{color:var(--high);} .risk-moderate{color:var(--moderate);}
@@ -55,7 +55,15 @@
 
   /* chart */
   #spectrum{width:100%;height:auto;display:block;}
-  .xs-fig{width:100%;height:auto;display:block;max-width:900px;}
+  #xsec{overflow-x:auto;}
+  .xs-fig{width:100%;height:auto;display:block;max-width:900px;min-width:560px;}
+  /* scorecard: on a phone the 3-up grid is too tight and values orphan their
+     units, so drop to two columns (risk spans the top) and keep value+unit whole */
+  @media (max-width:520px){
+    .scorecard{grid-template-columns:1fr 1fr;gap:20px 22px;}
+    .stat.risk{grid-column:1 / -1;}
+    .stat .v{font-size:20px;}
+  }
   .xs-fig text{font-family:var(--sans);}
   .xs-terrain{fill:var(--line);}
   .xs-terrline{fill:none;stroke:var(--line-strong);stroke-width:1.3;}
@@ -76,13 +84,13 @@
   .legend .swatch.band{width:0;height:13px;border-left:1px dashed var(--faint);border-radius:0;}
 
   /* table */
-  .tbl{border-top:1px solid var(--line-strong);}
+  .tbl{border-top:1px solid var(--line-strong);overflow-x:auto;}
   table{border-collapse:collapse;width:100%;font-size:13.5px;}
   thead th{text-align:left;padding:9px 14px 9px 0;font-size:11px;letter-spacing:.08em;
            text-transform:uppercase;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);}
   tbody td{padding:9px 14px 9px 0;border-bottom:1px solid var(--line);vertical-align:baseline;}
   tbody tr:last-child td{border-bottom:none;}
-  td.r{text-align:right;padding-right:0;font-variant-numeric:tabular-nums;}
+  td.r{text-align:right;padding-right:0;font-variant-numeric:tabular-nums;white-space:nowrap;}
   th.r{text-align:right;padding-right:0;}
   .owner{font-weight:600;} .svc{color:var(--muted);} td.freq{color:var(--muted);font-variant-numeric:tabular-nums;}
   .far{color:var(--faint);}
@@ -209,7 +217,7 @@ const DATA = /*REPORT_DATA*/;
     // colour the High/Moderate/Low labels inside the QRM string
     const qrm=(DATA.qrm||"").replace(/(High|Moderate|Low):/g,(m,g)=>`<span class="lvl ${g.toLowerCase()}">${m}</span>`);
     document.getElementById("scorecard").innerHTML=`
-      <div class="stat"><div class="k">Overload risk</div>
+      <div class="stat risk"><div class="k">Overload risk</div>
         <div class="v risk-word risk-${riskCls}">${riskName}</div></div>
       <div class="stat"><div class="k">Total ERP</div><div class="v num">${human(DATA.total_erp_w)}</div></div>
       <div class="stat"><div class="k">Field strength</div><div class="v num">≈ ${DATA.field_vm} V/m</div></div>
