@@ -602,6 +602,23 @@ def merge_sources(*dfs):
 FIELD_THRESHOLD_W_M2 = 0.01
 
 
+def _site_erp(rf):
+    """For each source, the combined ERP of every powered source co-located with
+    it (~250 m grid). Lets the field-strength filter include a farm of moderate
+    co-located stations whose *sum* clears the threshold even though no single one
+    does — e.g. San Bruno's ~30 FM stations lighting a summit 5-6 km off, each
+    individually under the floor but collectively a real field."""
+    lat = rf["lat"].to_numpy(); lon = rf["lon"].to_numpy()
+    p = rf["max_power_w"].to_numpy(dtype=float)
+    kl = np.round(lat / 0.0025).astype("int64")
+    ko = np.round(lon / 0.0025).astype("int64")
+    tot = defaultdict(float)
+    for i in range(len(rf)):
+        if np.isfinite(p[i]):
+            tot[(kl[i], ko[i])] += p[i]
+    return np.array([tot.get((kl[i], ko[i]), 0.0) for i in range(len(rf))])
+
+
 def spatial_join(summits, rf, radius_m, field_threshold=FIELD_THRESHOLD_W_M2):
     from sklearn.neighbors import BallTree
     if len(summits) == 0 or len(rf) == 0:
@@ -628,6 +645,7 @@ def spatial_join(summits, rf, radius_m, field_threshold=FIELD_THRESHOLD_W_M2):
     ind, dist = tree.query_radius(su_rad, r=max_radius / R,
                                   return_distance=True, sort_results=True)
     powers = rf["max_power_w"].to_numpy(dtype=float)
+    site_erp = _site_erp(rf)                 # co-located combined ERP per source
     recs, n_far = [], 0
     s = summits.reset_index(drop=True)
     for i, (idxs, ds) in enumerate(zip(ind, dist)):
@@ -636,7 +654,9 @@ def spatial_join(summits, rf, radius_m, field_threshold=FIELD_THRESHOLD_W_M2):
         d = ds * R
         p = powers[idxs]
         near = d <= radius_m
-        far = (~near) & np.isfinite(p) & (p / (d * d) >= field_threshold)
+        # far inclusion uses the source's *site* ERP, so a farm of moderate
+        # co-located stations is kept when their sum clears the floor.
+        far = (~near) & np.isfinite(p) & (site_erp[idxs] / (d * d) >= field_threshold)
         n_far += int(far.sum())
         srow = s.iloc[i]
         for k in np.flatnonzero(near | far):
@@ -717,17 +737,28 @@ HAM_BANDS = [("40m", 7.15), ("30m", 10.125), ("20m", 14.2), ("17m", 18.118),
              ("15m", 21.225), ("12m", 24.94), ("10m", 28.85), ("6m", 52),
              ("2m", 146), ("70cm", 435), ("23cm", 1270)]
 RISK_ORDER = ["CLEAR", "LOW", "MODERATE", "HIGH"]
-# Field-strength tier thresholds (V/m). Calibrated to ground truth: a summit
-# ringed by a broadcast farm a few km off (Occidental/Mt Wilson ≈ 10 V/m) reads
-# HIGH; co-sited masts read far higher; a quiet peak sits under ~1 V/m.
-FIELD_HIGH_VM, FIELD_MOD_VM, FIELD_LOW_VM = 10.0, 3.0, 1.0
+# Field-strength tier thresholds (V/m of PHYSICAL free-space field), calibrated
+# to receiver desense: at what background field does an activator lose a weak
+# (S5 ≈ −117 dBm) FM signal? Graded by radio quality:
+#   MODERATE 0.15 — blocks S5 on a cheap wideband HT (Quansheng/Baofeng: overload
+#                   onset ~−20 dBm at the antenna, poor front-end filtering).
+#   HIGH     1.5  — blocks S5 even on a decent radio (~20 dB better blocking).
+#   LOW      0.05 — a Quansheng is degraded but S5 is still copyable.
+#   CLEAR         — even a Quansheng is fine.
+# See _desense_field() for the derivation. This is the physical field, so the
+# per-source broadcast desense weight is retired (BROADCAST_HAM_WEIGHT = 1).
+FIELD_HIGH_VM, FIELD_MOD_VM, FIELD_LOW_VM = 1.5, 0.15, 0.05
 # Broadcast (FM/TV/AM) desenses a ham receiver worse per watt than land-mobile:
 # a continuous megawatt carrier, and cheap ham front-ends reject the FM/UHF-TV
 # bands poorly. So broadcast gets a coupling multiplier on its ERP/d² when
 # scoring overload — applied to BOTH the per-band field and the total (broadband)
 # field, so per-band stays ≤ overall. 9× power ≈ 3× field: a 500 kW FM farm ~1 km
 # off then reads MODERATE on 2m instead of a falsely-quiet LOW.
-BROADCAST_HAM_WEIGHT = 9.0
+# Retired: the score is now the PHYSICAL field against a desense-calibrated
+# threshold (see FIELD_*_VM), which already makes broadcast's high ERP dominate —
+# no separate per-watt desense weight needed. Kept at 1.0 so the code path (and
+# the option to re-introduce a weight) stays intact.
+BROADCAST_HAM_WEIGHT = 1.0
 # Null-fill floor for the vertical-pattern gain (_vpat_gain): a real FM master
 # antenna fills its pattern nulls to serve close-in terrain, so its relative field
 # toward a summit never drops below ~15% of peak (≈ −16 dB) the way an ideal
@@ -841,6 +872,19 @@ def _vpat_gain(rc_amsl, summit_alt_m, distance_m, bays, spacing, near_floor=1000
 def _field_vm(sum_erp_over_d2):
     """Σ ERP/d² (W/m²-ish) -> estimated field strength E = √(30·Σ) in V/m."""
     return (30.0 * sum_erp_over_d2) ** 0.5
+
+
+def _desense_field(block_dbm=-20.0, gain_dbi=-6.0, f_mhz=100.0):
+    """Physical field (V/m) at which a receiver whose overload/blocking onset is
+    `block_dbm` (referred to the antenna) can no longer copy a weak S5 (≈ −117 dBm)
+    FM signal — the basis for the FIELD_*_VM tiers. A Quansheng-class HT blocks
+    around −20 dBm → ≈ 0.15 V/m (MODERATE anchor); a decent radio ~20 dB better
+    → ≈ 1.5 V/m (HIGH). Antenna capture is an electrically-short duck (~−6 dBi)
+    at the FM band. Derivation/tuning aid, not called in the hot path."""
+    p_w = 10.0 ** (block_dbm / 10.0) / 1000.0
+    lam = 300.0 / f_mhz
+    ae = (10.0 ** (gain_dbi / 10.0)) * lam * lam / (4.0 * math.pi)
+    return (377.0 * p_w / ae) ** 0.5
 
 
 def _risk_tier(field_vm):
@@ -1045,9 +1089,11 @@ _TIER_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "clear", "CLEAR": "cl
 _OVERALL_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "low", "CLEAR": "clear"}
 
 
-def _report_data(d, meta, code, base_radius=1000.0):
+def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None):
     """Assemble the DATA dict the report template renders for one summit.
-    `d` = that summit's join rows; `meta` = its summit meta row (or None)."""
+    `d` = that summit's join rows; `meta` = its summit meta row (or None).
+    With `dem_dir`, add a terrain+pattern cross-section when a source on another
+    peak dominates the exposure (Davidson-style; co-sited-only summits get none)."""
 
     scatter, barp = [], {}                       # barp: label -> [power, lo, hi]
     recv = {b: 0.0 for b, _ in HAM_BANDS}
@@ -1118,7 +1164,7 @@ def _report_data(d, meta, code, base_radius=1000.0):
 
     def _m(col):
         return None if meta is None or col not in meta or pd.isna(meta[col]) else meta[col]
-    return dict(
+    data = dict(
         code=code, name=(str(_m("name")) if _m("name") is not None else code),
         alt_m=(None if _m("alt_m") is None else float(_m("alt_m"))),
         activations=(None if _m("activations") is None else int(_m("activations"))),
@@ -1127,6 +1173,20 @@ def _report_data(d, meta, code, base_radius=1000.0):
         n_bcast=n_bcast, n_lm=n_lm, n_uw=n_uw,
         bands=[dict(label=l, lo=lo, hi=hi, p=p) for l, (p, lo, hi) in barp.items()],
         scatter=scatter, ham=ham, emitters=emitters)
+    if dem_dir:
+        try:
+            import report_crosssection as _rx
+            s0 = d.iloc[0]
+            summit = dict(lat=float(s0["summit_lat"]), lon=float(s0["summit_lon"]),
+                          alt=(float(s0["summit_alt_m"]) if pd.notna(s0["summit_alt_m"]) else None),
+                          code=code, name=data["name"])
+            svg = _rx.crosssection_svg(d, summit, base_radius, dem_dir,
+                                       vpat_gain=_vpat_gain, human_w=human_w)
+            if svg:
+                data["crosssection_svg"] = svg
+        except Exception as e:                       # a DEM hiccup must never break a card
+            log(f"  cross-section skipped for {code}: {e}")
+    return data
 
 
 _REPORT_TPL = None
@@ -1151,13 +1211,14 @@ def _emit_report(data, out_path, provenance=None, template=None):
 
 
 def write_report_card(joined, summits, code, out_path, base_radius=1000.0,
-                      template=None, provenance=None):
+                      template=None, provenance=None, dem_dir=None):
     d = joined[joined["summit"] == code]
     if d.empty:
         raise ValueError(f"no in-range sources for summit {code!r}")
     mrow = summits[summits["summit"] == code]
     meta = mrow.iloc[0] if len(mrow) else None
-    return _emit_report(_report_data(d, meta, code, base_radius), out_path, provenance, template)
+    return _emit_report(_report_data(d, meta, code, base_radius, dem_dir),
+                        out_path, provenance, template)
 
 
 def _qrm(data):
@@ -1174,10 +1235,12 @@ def _qrm(data):
                 levels={"high": high, "moderate": mod})
 
 
-def write_report_bundle(joined, summits, out_dir, base_radius=1000.0, provenance=None):
+def write_report_bundle(joined, summits, out_dir, base_radius=1000.0, provenance=None,
+                        dem_dir=None):
     """Batch: one report card per impacted summit into out_dir/reports/, plus a
     compact out_dir/qrm_index.json (risk, QRM summary, report link) for a host
-    page (e.g. the SOTA propagation map) to merge in."""
+    page (e.g. the SOTA propagation map) to merge in. With `dem_dir`, cards for
+    summits lit by another peak carry a terrain+pattern cross-section."""
     reports_dir = os.path.join(out_dir, "reports")
     os.makedirs(reports_dir, exist_ok=True)
     meta_by = summits.set_index("summit")
@@ -1186,7 +1249,7 @@ def write_report_bundle(joined, summits, out_dir, base_radius=1000.0, provenance
         meta = meta_by.loc[code] if code in meta_by.index else None
         if meta is not None and getattr(meta, "ndim", 1) > 1:   # dup codes -> first
             meta = meta.iloc[0]
-        data = _report_data(d, meta, code, base_radius)
+        data = _report_data(d, meta, code, base_radius, dem_dir)
         fname = code.replace("/", "_") + "_report.html"
         _emit_report(data, os.path.join(reports_dir, fname), provenance)
         q = _qrm(data)
@@ -1233,6 +1296,10 @@ def main():
                     help="base URL where report cards are hosted (e.g. "
                          "https://km6am.com/rf); adds a report link to each "
                          "CalTopo summit popup")
+    ap.add_argument("--dem-dir", metavar="DIR",
+                    help="local SRTM tile cache (auto-fetched); enables the "
+                         "terrain+pattern cross-section on report cards for summits "
+                         "lit by another peak. Needs network on first tile fetch.")
     ap.add_argument("--broadcast-dir",
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
@@ -1314,13 +1381,14 @@ def main():
             p_report = write_report_card(
                 joined, summits, args.report,
                 os.path.join(args.out_dir, args.report.replace("/", "_") + "_report.html"),
-                args.radius, provenance=prov)
+                args.radius, provenance=prov, dem_dir=args.dem_dir)
         except ValueError as e:
             log(f"  report: {e}")
 
     n_bundle = 0
     if args.reports_dir and len(joined):
-        n_bundle = write_report_bundle(joined, summits, args.reports_dir, args.radius, prov)
+        n_bundle = write_report_bundle(joined, summits, args.reports_dir, args.radius, prov,
+                                       dem_dir=args.dem_dir)
         log(f"  report bundle: {n_bundle} cards + qrm_index.json -> {args.reports_dir}")
 
     log("\n=== done ===")

@@ -145,9 +145,17 @@ the end), but the indices above are verified against the real files.
   per source per band, never per-frequency). The summit's **overall** tier uses
   the total field over ALL sources (broadband front-end overload); each ham
   band's QRM level uses the in-±octave field. Tiers in V/m: HIGH≥10 / MOD≥3 /
-  LOW≥1 / CLEAR (`FIELD_*_VM`), calibrated to ground truth — Occidental Pk next
-  to Mt Wilson (~15 MW a few km off) reads ~10 V/m = HIGH, not the false green a
-  d²-only score gave it; blank-freq UHF-TV (ch>36) is scored in the 70cm octave.
+  CLEAR (`FIELD_*_VM`) — **re-anchored to receiver desense** (not arbitrary):
+  the field at which an activator loses a weak **S5 (≈ −117 dBm) FM signal**,
+  graded by radio quality. **MODERATE 0.15 V/m** = blocks S5 on a cheap wideband
+  HT (Quansheng/Baofeng, ~−20 dBm overload onset); **HIGH 1.5 V/m** = blocks S5
+  even on a decent radio (~20 dB better); **LOW 0.05** = Quansheng degraded but
+  S5 copyable; CLEAR = even a Quansheng is fine. Derivation in `_desense_field()`.
+  These are the **physical** field, so the old 9× broadcast desense weight is
+  retired (`BROADCAST_HAM_WEIGHT`=1) — a low physical threshold already makes
+  broadcast dominate. Known-hot peaks land HIGH (San Bruno 48, Richardson 30,
+  Occidental 10, Mt Davidson 8.6 V/m); blank-freq UHF-TV (ch>36) is scored in the
+  70cm octave.
   **Broadcast desense weight (`BROADCAST_HAM_WEIGHT`=9):** FM/TV/AM ERP/d² is
   multiplied by 9 (≈3× field) in the score — a continuous megawatt carrier
   desenses cheap ham front-ends far worse per watt than land-mobile. Applied to

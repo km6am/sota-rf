@@ -167,9 +167,13 @@ assert m.human_w(1_000_000) == "1.00 MW", m.human_w(1_000_000)
 assert m.human_w(45_000) == "45 kW", m.human_w(45_000)
 assert m.human_w(250) == "250 W", m.human_w(250)
 assert m.human_w(None) == "—" and m.human_w(float("nan")) == "—"
-# risk tiers now in field strength (V/m): HIGH>=10, MODERATE>=3, LOW>=1
-assert m._risk_tier(12) == "HIGH" and m._risk_tier(5) == "MODERATE"
-assert m._risk_tier(1.5) == "LOW" and m._risk_tier(0.5) == "CLEAR"
+# risk tiers = PHYSICAL field (V/m) vs receiver-desense of an S5 signal:
+# HIGH>=1.5 (blocks a decent radio), MODERATE>=0.15 (blocks a Quansheng),
+# LOW>=0.05 (Quansheng degraded), else CLEAR.
+assert m._risk_tier(2.0) == "HIGH" and m._risk_tier(0.5) == "MODERATE"
+assert m._risk_tier(0.1) == "LOW" and m._risk_tier(0.01) == "CLEAR"
+# desense anchor: a Quansheng (~-20 dBm block) loses S5 at ~0.15 V/m
+assert 0.10 < m._desense_field(-20.0) < 0.20, m._desense_field(-20.0)
 # field helper: E = sqrt(30 * Sigma ERP/d^2); Occidental's ~3.57 -> ~10.3 V/m
 assert abs(m._field_vm(3.57) - 10.35) < 0.2, m._field_vm(3.57)
 # power->colour: no ERP is neutral grey; more power is redder (higher R channel)
