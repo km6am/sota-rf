@@ -234,7 +234,10 @@ def capabilities_110(base):
         f'<ows:Get xlink:href="{wfs}?"/></ows:HTTP></ows:DCP>'
         '<ows:Parameter name="resultType"><ows:Value>results</ows:Value>'
         '<ows:Value>hits</ows:Value></ows:Parameter>'
-        '<ows:Parameter name="outputFormat"><ows:Value>application/json</ows:Value></ows:Parameter>'
+        # CalTopo's Auto-Configure parser requires ≥2 <ows:Value> here; with a
+        # single value it rejects the doc. Both name the same GeoJSON output.
+        '<ows:Parameter name="outputFormat"><ows:Value>application/json</ows:Value>'
+        '<ows:Value>json</ows:Value></ows:Parameter>'
         '</ows:Operation></ows:OperationsMetadata>'
         f'<wfs:FeatureTypeList>{fts}</wfs:FeatureTypeList>'
         '</wfs:WFS_Capabilities>')
