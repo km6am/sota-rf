@@ -675,6 +675,74 @@ def spatial_join(summits, rf, radius_m, field_threshold=FIELD_THRESHOLD_W_M2):
     return pd.DataFrame(recs)
 
 
+def _pair_key(summit, db, ref, lat, lon):
+    return f"{summit}|{db}|{ref}|{round(float(lat), 5)}|{round(float(lon), 5)}"
+
+
+def _source_amsl(r, dem_dir):
+    """Best AMSL for a source's radiation centre: the FCC radiation-centre height
+    for broadcast, else terrain (DEM) + AGL, else the summit's own altitude."""
+    if not pd.isna(r.rf_height_amsl_m):
+        return float(r.rf_height_amsl_m)
+    import dem_terrain as _dtm
+    g = _dtm.elevation(float(r.rf_lat), float(r.rf_lon), dem_dir)
+    agl = float(r.rf_height_agl_m) if not pd.isna(r.rf_height_agl_m) else 30.0
+    return (g if not np.isnan(g) else float(r.summit_alt_m)) + agl
+
+
+def apply_terrain(joined, dem_dir=None, cache_path=None, base_radius=1000.0):
+    """Add a `terrain_loss_db` column (per summit×source pair). Terrain LOS is
+    fixed geometry, so it is cached by (summit, source) and only new pairs are
+    computed — and only with a DEM present. On a DEM-less box the cache is read
+    and any uncached pair defaults to clear line-of-sight (0 dB), the safe
+    direction. Only *far* pairs (beyond the near/co-sited zone) are tested; a mast
+    within the base radius is on the summit and is line-of-sight by definition."""
+    if len(joined) == 0:
+        joined = joined.copy(); joined["terrain_loss_db"] = []
+        return joined
+    cache = {}
+    if cache_path and os.path.exists(cache_path):
+        try:
+            with open(cache_path) as f:
+                cache = json.load(f)
+        except Exception:
+            cache = {}
+    loss = np.zeros(len(joined), dtype=float)
+    new = 0
+    for i, r in enumerate(joined.itertuples(index=False)):
+        if r.distance_m <= base_radius or pd.isna(r.rf_max_power_w):
+            continue
+        key = _pair_key(r.summit, r.rf_source_db, r.rf_ref, r.rf_lat, r.rf_lon)
+        if key in cache:
+            loss[i] = cache[key]; continue
+        if not dem_dir:
+            continue                                   # no DEM -> assume LOS
+        import dem_terrain as _dtm
+        fq = 100.0
+        for tok in str(r.rf_freqs_mhz).split(";"):
+            try:
+                v = float(tok)
+                if not np.isnan(v):
+                    fq = v; break
+            except ValueError:
+                pass
+        L = _dtm.terrain_loss(float(r.summit_lat), float(r.summit_lon),
+                              float(r.summit_alt_m), float(r.rf_lat), float(r.rf_lon),
+                              _source_amsl(r, dem_dir), fq, dem_dir)
+        cache[key] = L; loss[i] = L; new += 1
+    joined = joined.copy()
+    joined["terrain_loss_db"] = loss
+    if cache_path and new:
+        tmp = cache_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, cache_path)
+    log(f"  terrain: {int((loss > 6).sum())} far pairs shadowed (>6 dB) of "
+        f"{int((joined['distance_m'] > base_radius).sum())} far; {new} newly computed, "
+        f"cache {len(cache)}")
+    return joined
+
+
 def summarise(joined, summits):
     if len(joined) == 0:
         base = summits[["summit", "name", "region", "lat", "lon", "alt_m"]].copy()
@@ -945,7 +1013,8 @@ def _summit_analysis(joined, base_radius=1000.0):
             # sources keep full ERP — the guard lives in _vpat_gain).
             g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
                              r.rf_bays, r.rf_spacing, near_floor=base_radius)
-            contrib = w * g_v * p / (max(r.distance_m, 10.0) ** 2)
+            tl = getattr(r, "terrain_loss_db", 0.0) or 0.0    # diffraction loss (dB)
+            contrib = w * g_v * (10.0 ** (-tl / 10.0)) * p / (max(r.distance_m, 10.0) ** 2)
             field_sum += contrib
             fs = []
             for tok in str(r.rf_freqs_mhz).split(";"):
@@ -1124,6 +1193,8 @@ def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None):
             w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
             g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
                              r.rf_bays, r.rf_spacing, near_floor=base_radius)
+            tl = getattr(r, "terrain_loss_db", 0.0) or 0.0
+            g_v *= 10.0 ** (-tl / 10.0)                        # diffraction loss
             field_sum += w * g_v * p / (dist * dist)
             for f in fs:
                 if 0.4 < f <= 1000:
@@ -1300,6 +1371,11 @@ def main():
                     help="local SRTM tile cache (auto-fetched); enables the "
                          "terrain+pattern cross-section on report cards for summits "
                          "lit by another peak. Needs network on first tile fetch.")
+    ap.add_argument("--terrain-cache", metavar="FILE",
+                    help="JSON cache of per-pair terrain diffraction loss. Read to "
+                         "de-rate shadowed far sources in the score; with --dem-dir, "
+                         "missing pairs are computed and written back. Without a DEM "
+                         "the cache is read-only and uncached pairs assume clear LOS.")
     ap.add_argument("--broadcast-dir",
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
@@ -1360,6 +1436,8 @@ def main():
     log("[5/5] merge + spatial join")
     rf = merge_sources(asr, uls, bcast)
     joined = spatial_join(summits, rf, args.radius)
+    joined = apply_terrain(joined, dem_dir=args.dem_dir,
+                           cache_path=args.terrain_cache, base_radius=args.radius)
     summary = summarise(joined, summits)
     prov = data_provenance(sfile, afile, ufiles, bfiles)
 
