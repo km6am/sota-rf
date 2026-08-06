@@ -156,6 +156,23 @@ the end), but the indices above are verified against the real files.
   2m/6m; now MODERATE, matching real front-end overload from a broadcast farm a
   km away — while co-sited FM summits (San Bruno) stay HIGH and the overall map
   barely shifts. Drives the **marker colour**.
+  **Vertical antenna pattern (`_vpat_gain`, FM only):** broadcast ERP is the
+  main-beam (horizon) value; a summit a few degrees off that beam sees less. FM
+  `num_sections`/`spacing` (bays + bay-spacing in λ) come straight from CDBS
+  `fm_eng_data`, giving an N-bay array-factor × cos-element pattern. The gain
+  de-rates a source's ERP/d² by its relative power toward the summit's elevation
+  angle `atan((rc_amsl−summit_alt)/d)`. Two guards keep it physical: a
+  **near-field/co-location floor** (`max(base_radius, Rayleigh 2D²/λ)`) — a mast
+  within the near zone blasts a co-located operator regardless of beam direction,
+  so it keeps full ERP (this is why co-sited broadcast summits stay HIGH) — and a
+  **null-fill floor** (`VPAT_NULL_FILL`=0.15) since real masts fill their nulls
+  to serve the city. Verified against the Sutro/San Bruno→Mt Davidson field study
+  (KOIT ERI SHP-6, KIOI Jampro). **Low-yield on the tier map** (national: 3/3547
+  summits shift, all downward) because risk-dominating broadcast is either
+  co-sited (near-field, full power) or far-but-near-horizon (in-beam), and TV
+  (biggest ERP) has no bay data in CDBS → gain 1. Kept for correctness, a
+  pattern-aware report card, and to plumb bays/spacing for the microwave
+  beam-axis test. TV/AM/land-mobile → gain 1 (no data / omni).
   CalTopo constraints discovered the hard way: (1) popups are **plain-text only**
   (no HTML/img/clickable links, per CalTopo's help forum), so the rich
   report-card mockup can't live *in* CalTopo — it's a browser companion; (2)
@@ -218,6 +235,24 @@ the end), but the indices above are verified against the real files.
      octave window with ground truth;
      (d) true per-record delta updates (FCC daily transaction files → a
      persistent datastore) if the monthly full pull is too heavy.
+8. **Directional / propagation realism (from the Mt Davidson field study).** The
+   field model was `ERP/d²`; the study showed two physical corrections matter.
+   - (a) ~~**Vertical antenna pattern** (Phase A)~~ **DONE** — `_vpat_gain`,
+     see the scoring notes above. FM bays/spacing from CDBS; near-field +
+     null-fill guards; low-yield on tiers (3/3547) but grounds the report card
+     and plumbs bays/spacing. Zero new data (rides the existing CDBS parse).
+   - (b) **Terrain LOS / diffraction** (Phase B) — **NEXT.** The bigger accuracy
+     lever: prune false-positives (summits that read exposed but are terrain-
+     shadowed). Plan: a one-time static DEM (SRTM 90 m, windowed reads, low RAM),
+     per-surviving-pair LOS + knife-edge diffraction loss, cached by
+     `(summit, source_key)` so it's computed once and monthly rebuilds only touch
+     new/moved sources. ~63 k surviving pairs → seconds. No monthly fetch delta
+     (DEM static, cache incremental).
+   - (c) **Microwave beam-axis test** (Phase C) — point-to-point paths are pencil
+     beams; test whether the summit is near the beam axis (from the ULS path
+     endpoints) to prune the ~423 k microwave hits, most of which are off-beam.
+   - (d) Azimuth (directional) FM/TV patterns; optional exact LMS-filed elevation
+     patterns (beam tilt + null-fill) for the high-value stations.
 
 ## Known gaps / gotchas
 - ASR only requires registration above ~200 ft AGL (or near airports) — short

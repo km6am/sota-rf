@@ -176,3 +176,14 @@ assert abs(m._field_vm(3.57) - 10.35) < 0.2, m._field_vm(3.57)
 assert m.power_to_hex(None) == "#8a97a3", m.power_to_hex(None)
 assert m.power_to_hex(1_000_000)[1:3] > m.power_to_hex(200)[1:3], "1 MW should be redder than 200 W"
 print("CalTopo scoring self-check OK: human_w / risk tiers / power heat-colour")
+
+# --- vertical-pattern gain (_vpat_gain) -------------------------------------
+# missing bays / non-broadcast -> no correction (full ERP)
+assert m._vpat_gain(443, 283, 1904, float("nan"), float("nan")) == 1.0
+# co-sited / within the near-field floor -> full ERP even if geometrically off-beam
+assert m._vpat_gain(430, 339, 164, 8, 0.8, near_floor=1000.0) == 1.0
+# genuinely far, near-horizon (KOIT->Mt Davidson: 6 bay 0.5λ, 4.8°) -> ~0.81 power
+assert abs(m._vpat_gain(443, 283, 1904, 6, 0.5, near_floor=1000.0) - 0.81) < 0.03
+# far + steep off-beam is de-rated but floored by null-fill (never below ~0.15^2)
+assert m._vpat_gain(700, 300, 1200, 6, 1.0, near_floor=1000.0) >= m.VPAT_NULL_FILL**2 - 1e-9
+print("vertical-pattern self-check OK: near-field guard / far de-rate / null-fill floor")

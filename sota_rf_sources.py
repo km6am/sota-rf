@@ -30,6 +30,7 @@ import csv
 import datetime
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -112,6 +113,7 @@ FAC = dict(comm_city=0, comm_state=1, callsign=5, channel=6, freq=9,
 # FM: effective_erp is almost always blank -- horiz_erp/vert_erp carry the ERP.
 FM_ENG = dict(facility_id=20, eng_rec=19, asrn=9, station_class=49, channel=62,
               erp_eff=16, erp_h=29, erp_v=52, haat=23, rcamsl=47,
+              num_sections=53, spacing=56,         # vertical pattern: bays + bay spacing (λ)
               lat_deg=30, lat_dir=31, lat_min=32, lat_sec=33,
               lon_deg=34, lon_dir=35, lon_min=36, lon_sec=37)
 # TV: effective_erp is the reliable field (power_output_vis_kw as fallback).
@@ -423,10 +425,12 @@ def load_uls(zip_paths):
 # --------------------------------------------------------------------------- #
 # Broadcast FM/TV/AM (FCC CDBS media) -- the high-ERP sources
 # --------------------------------------------------------------------------- #
-def _broadcast_row(db, fid, finfo, lat, lon, erp_kw, freq_mhz, rcamsl, asrn, services):
+def _broadcast_row(db, fid, finfo, lat, lon, erp_kw, freq_mhz, rcamsl, asrn, services,
+                   bays=np.nan, spacing=np.nan):
     """Assemble one unified RF-source row from a broadcast facility + engineering
     record. ERP comes in kW; the unified table is watts (broadcast dwarfs the
-    land-mobile sources, which is exactly the point)."""
+    land-mobile sources, which is exactly the point). `bays`/`spacing` (FM only,
+    from CDBS num_sections/spacing) drive the vertical-pattern gain in scoring."""
     cs = (finfo.get("callsign") or "").strip() or fid
     city, state = finfo.get("city", ""), finfo.get("state", "")
     where = ", ".join(p for p in (city, state) if p)
@@ -444,6 +448,7 @@ def _broadcast_row(db, fid, finfo, lat, lon, erp_kw, freq_mhz, rcamsl, asrn, ser
         max_power_w=(np.nan if np.isnan(erp) else erp * 1000.0),
         services=services,
         link_reg=str(asrn).strip(),                # ASR registration -> physical tower
+        bays=to_float(bays), spacing=to_float(spacing),
         loc_name=where,
     )
 
@@ -494,7 +499,9 @@ def load_broadcast(facility_zip, fm_zip, tv_zip, am_eng_zip, am_ant_zip):
         services = svc + (f" class {cls}" if cls else "")
         row = _broadcast_row("FM", fid, finfo, lat, lon, erp,
                              to_float(finfo["freq"]),               # MHz already
-                             g(r, FM_ENG["rcamsl"]), g(r, FM_ENG["asrn"]), services)
+                             g(r, FM_ENG["rcamsl"]), g(r, FM_ENG["asrn"]), services,
+                             bays=g(r, FM_ENG["num_sections"]),
+                             spacing=g(r, FM_ENG["spacing"]))
         key = -1.0 if np.isnan(erp) else erp
         if fid not in fm_best or key > fm_best[fid][0]:
             fm_best[fid] = (key, row)
@@ -571,7 +578,7 @@ def load_broadcast(facility_zip, fm_zip, tv_zip, am_eng_zip, am_ant_zip):
 # --------------------------------------------------------------------------- #
 COLS = ["source_db", "ref", "owner", "lat", "lon", "struct_type",
         "height_agl_m", "height_amsl_m", "freqs_mhz", "max_power_w",
-        "services", "link_reg"]
+        "services", "link_reg", "bays", "spacing"]
 
 
 def merge_sources(*dfs):
@@ -582,7 +589,8 @@ def merge_sources(*dfs):
     for c in COLS:
         if c not in out.columns:
             out[c] = "" if c not in ("lat", "lon", "height_agl_m",
-                                     "height_amsl_m", "max_power_w") else np.nan
+                                     "height_amsl_m", "max_power_w",
+                                     "bays", "spacing") else np.nan
     return out[COLS + (["loc_name"] if "loc_name" in out.columns else [])]
 
 
@@ -720,6 +728,11 @@ FIELD_HIGH_VM, FIELD_MOD_VM, FIELD_LOW_VM = 10.0, 3.0, 1.0
 # field, so per-band stays ≤ overall. 9× power ≈ 3× field: a 500 kW FM farm ~1 km
 # off then reads MODERATE on 2m instead of a falsely-quiet LOW.
 BROADCAST_HAM_WEIGHT = 9.0
+# Null-fill floor for the vertical-pattern gain (_vpat_gain): a real FM master
+# antenna fills its pattern nulls to serve close-in terrain, so its relative field
+# toward a summit never drops below ~15% of peak (≈ −16 dB) the way an ideal
+# unfilled array would. Keeps the de-rate physical instead of a hard zero.
+VPAT_NULL_FILL = 0.15
 RISK_COLOR = {"HIGH": "#c8101e", "MODERATE": "#e0952b",
               "LOW": "#6da536", "CLEAR": "#4d7a20"}
 
@@ -790,6 +803,41 @@ def _cluster_freqs(items):
         yield emit(cluster)
 
 
+def _vpat_gain(rc_amsl, summit_alt_m, distance_m, bays, spacing, near_floor=1000.0):
+    """Relative POWER gain of a vertical FM antenna toward a summit — the fraction
+    of the beam-peak ERP that actually reaches it. ERP is defined at the main beam
+    (the horizon); a summit a few degrees below/above it sees ERP·g, g≤1.
+
+    Geometry: elevation angle θ = atan((rc_amsl − summit_alt)/distance). Pattern:
+    an N-bay collinear array factor (`bays`, `spacing` in λ, both from CDBS) times
+    a ~cos element factor that nulls straight up/down. Returns 1.0 when any input
+    is missing (non-broadcast, no bay data, or unknown heights) so those sources
+    keep full ERP — the correction only ever *reduces* a broadcast source that is
+    off its main beam, never invents extra field."""
+    if not (bays and spacing) or np.isnan(bays) or np.isnan(spacing) \
+            or bays < 1 or spacing <= 0 \
+            or np.isnan(rc_amsl) or np.isnan(summit_alt_m):
+        return 1.0
+    # Near-field / co-location guard. The far-field vertical pattern only holds
+    # past the array's Rayleigh distance (2D²/λ, D=bays·spacing·λ), and physically
+    # an operator within the model's near zone is standing at the transmitter site
+    # — bathed in near field, ground scatter and co-tower antennas regardless of
+    # where any one main beam points. So only de-rate genuinely far, off-beam
+    # broadcast; anything closer keeps full ERP. (This is why co-sited broadcast
+    # summits stay HIGH; the pattern only touches near-but-not-on geometry.)
+    lam = 3.0
+    if distance_m < max(near_floor, 2.0 * (bays * spacing * lam) ** 2 / lam):
+        return 1.0
+    a = abs(math.atan2(rc_amsl - summit_alt_m, max(distance_m, 10.0)))
+    x = math.pi * spacing * math.sin(a)
+    af = 1.0 if abs(math.sin(x)) < 1e-9 else abs(math.sin(bays * x) / (bays * math.sin(x)))
+    field = af * max(math.cos(a), 0.0)             # element factor: nulls up/down
+    # Null-fill floor: real broadcast arrays fill their pattern nulls (beam tilt +
+    # phasing) to serve close-in ground, so the field never truly zeroes. Cap the
+    # de-rate at ~15% field (≈ −16 dB) rather than the theoretical −∞ of a null.
+    return max(field, VPAT_NULL_FILL) ** 2          # power gain (field²)
+
+
 def _field_vm(sum_erp_over_d2):
     """Σ ERP/d² (W/m²-ish) -> estimated field strength E = √(30·Σ) in V/m."""
     return (30.0 * sum_erp_over_d2) ** 0.5
@@ -849,7 +897,11 @@ def _summit_analysis(joined, base_radius=1000.0):
             if pd.isna(p):
                 continue
             w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
-            contrib = w * p / (max(r.distance_m, 10.0) ** 2)
+            # Vertical-pattern de-rate for off-beam far-field broadcast (near/co-sited
+            # sources keep full ERP — the guard lives in _vpat_gain).
+            g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
+                             r.rf_bays, r.rf_spacing, near_floor=base_radius)
+            contrib = w * g_v * p / (max(r.distance_m, 10.0) ** 2)
             field_sum += contrib
             fs = []
             for tok in str(r.rf_freqs_mhz).split(";"):
@@ -1024,7 +1076,9 @@ def _report_data(d, meta, code, base_radius=1000.0):
             # broadcast desense weight (see BROADCAST_HAM_WEIGHT) — applied to the
             # overload field only; the bars/scatter still show real (unweighted) ERP.
             w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
-            field_sum += w * p / (dist * dist)
+            g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
+                             r.rf_bays, r.rf_spacing, near_floor=base_radius)
+            field_sum += w * g_v * p / (dist * dist)
             for f in fs:
                 if 0.4 < f <= 1000:
                     scatter.append([round(f, 4), int(round(p))])
@@ -1032,7 +1086,7 @@ def _report_data(d, meta, code, base_radius=1000.0):
                    if lo <= f < hi and lo < 1000}
             for lbl, lo, hi in hit:
                 barp.setdefault(lbl, [0.0, lo, min(hi, 1000)])[0] += p
-            rv = w * p / (dist * dist)
+            rv = w * g_v * p / (dist * dist)
             hit_ham = {hb for f in fs for hb, fc in HAM_BANDS if 0.5 * fc <= f <= 2 * fc}
             if not fs and r.rf_source_db == "TV":     # blank-freq UHF-TV -> 70cm octave
                 hit_ham.add("70cm")
