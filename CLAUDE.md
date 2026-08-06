@@ -249,13 +249,18 @@ the end), but the indices above are verified against the real files.
      see the scoring notes above. FM bays/spacing from CDBS; near-field +
      null-fill guards; low-yield on tiers (3/3547) but grounds the report card
      and plumbs bays/spacing. Zero new data (rides the existing CDBS parse).
-   - (b) **Terrain LOS / diffraction** (Phase B) — **NEXT.** The bigger accuracy
-     lever: prune false-positives (summits that read exposed but are terrain-
-     shadowed). Plan: a one-time static DEM (SRTM 90 m, windowed reads, low RAM),
-     per-surviving-pair LOS + knife-edge diffraction loss, cached by
-     `(summit, source_key)` so it's computed once and monthly rebuilds only touch
-     new/moved sources. ~63 k surviving pairs → seconds. No monthly fetch delta
-     (DEM static, cache incremental).
+   - (b) ~~**Terrain LOS / diffraction** (Phase B)~~ **DONE.** `dem_terrain.py`
+     (SRTM-30 m skadi tiles, no auth) + `apply_terrain()`: ITU-R P.526 knife-edge
+     diffraction over the effective-Earth profile de-rates each *far* pair's
+     ERP/d² (near/co-sited = LOS by definition). Result is fixed geometry →
+     cached by `(summit, source)` in a JSON keyed cache; **built locally where the
+     DEM lives (`--dem-dir --terrain-cache`), shipped by rsync to the droplet's
+     `data/terrain_cache.json`**, which the pipeline reads **read-only** (no DEM
+     on the box; uncached pairs = clear LOS, the safe default). National: 1052 of
+     8004 far pairs shadowed >6 dB, **26 summits pruned downward** (0 up). Monthly
+     droplet rebuild applies it from the cache at zero extra fetch; I refresh the
+     cache locally when sources move. Validated on Diablo/Tam (shadowed) and the
+     photo-confirmed Mt Davidson←Sutro (clear).
    - (c) **Microwave beam-axis test** (Phase C) — point-to-point paths are pencil
      beams; test whether the summit is near the beam axis (from the ULS path
      endpoints) to prune the ~423 k microwave hits, most of which are off-beam.

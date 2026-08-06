@@ -1159,11 +1159,13 @@ _TIER_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "clear", "CLEAR": "cl
 _OVERALL_LVL = {"HIGH": "high", "MODERATE": "caution", "LOW": "low", "CLEAR": "clear"}
 
 
-def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None):
+def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None, xsec_cache=None):
     """Assemble the DATA dict the report template renders for one summit.
     `d` = that summit's join rows; `meta` = its summit meta row (or None).
-    With `dem_dir`, add a terrain+pattern cross-section when a source on another
-    peak dominates the exposure (Davidson-style; co-sited-only summits get none)."""
+    Cross-section: with `dem_dir` it's computed and (if `xsec_cache` given) cached;
+    without a DEM it's reused from `xsec_cache`. So a monthly rebuild on a DEM-less
+    box keeps the existing cross-sections (static terrain/antenna geometry) while
+    refreshing the rest of the card from current data."""
 
     scatter, barp = [], {}                       # barp: label -> [power, lo, hi]
     recv = {b: 0.0 for b, _ in HAM_BANDS}
@@ -1256,8 +1258,14 @@ def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None):
                                        vpat_gain=_vpat_gain, human_w=human_w)
             if svg:
                 data["crosssection_svg"] = svg
+                if xsec_cache is not None:
+                    xsec_cache[code] = svg
+            elif xsec_cache is not None:
+                xsec_cache.pop(code, None)           # no longer lit from off-summit
         except Exception as e:                       # a DEM hiccup must never break a card
             log(f"  cross-section skipped for {code}: {e}")
+    elif xsec_cache and code in xsec_cache:          # DEM-less rebuild: reuse cached SVG
+        data["crosssection_svg"] = xsec_cache[code]
     return data
 
 
@@ -1282,15 +1290,39 @@ def _emit_report(data, out_path, provenance=None, template=None):
     return out_path
 
 
+def _load_xsec_cache(path):
+    if path and os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_xsec_cache(path, cache):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cache, f)
+    os.replace(tmp, path)
+
+
 def write_report_card(joined, summits, code, out_path, base_radius=1000.0,
-                      template=None, provenance=None, dem_dir=None):
+                      template=None, provenance=None, dem_dir=None, xsec_cache_path=None):
     d = joined[joined["summit"] == code]
     if d.empty:
         raise ValueError(f"no in-range sources for summit {code!r}")
     mrow = summits[summits["summit"] == code]
     meta = mrow.iloc[0] if len(mrow) else None
-    return _emit_report(_report_data(d, meta, code, base_radius, dem_dir),
-                        out_path, provenance, template)
+    cache = _load_xsec_cache(xsec_cache_path)
+    out = _emit_report(_report_data(d, meta, code, base_radius, dem_dir, cache),
+                       out_path, provenance, template)
+    if dem_dir:
+        _save_xsec_cache(xsec_cache_path, cache)
+    return out
 
 
 def _qrm(data):
@@ -1308,20 +1340,22 @@ def _qrm(data):
 
 
 def write_report_bundle(joined, summits, out_dir, base_radius=1000.0, provenance=None,
-                        dem_dir=None):
+                        dem_dir=None, xsec_cache_path=None):
     """Batch: one report card per impacted summit into out_dir/reports/, plus a
     compact out_dir/qrm_index.json (risk, QRM summary, report link) for a host
-    page (e.g. the SOTA propagation map) to merge in. With `dem_dir`, cards for
-    summits lit by another peak carry a terrain+pattern cross-section."""
+    page (e.g. the SOTA propagation map) to merge in. Cross-sections come from
+    `dem_dir` (computed + cached to `xsec_cache_path`) or, on a DEM-less box, are
+    reused from that cache — so a monthly rebuild keeps them without a DEM."""
     reports_dir = os.path.join(out_dir, "reports")
     os.makedirs(reports_dir, exist_ok=True)
+    xsec_cache = _load_xsec_cache(xsec_cache_path)
     meta_by = summits.set_index("summit")
     index, n = {}, 0
     for code, d in joined.groupby("summit"):
         meta = meta_by.loc[code] if code in meta_by.index else None
         if meta is not None and getattr(meta, "ndim", 1) > 1:   # dup codes -> first
             meta = meta.iloc[0]
-        data = _report_data(d, meta, code, base_radius, dem_dir)
+        data = _report_data(d, meta, code, base_radius, dem_dir, xsec_cache)
         fname = code.replace("/", "_") + "_report.html"
         _emit_report(data, os.path.join(reports_dir, fname), provenance)
         q = _qrm(data)
@@ -1334,6 +1368,9 @@ def write_report_bundle(joined, summits, out_dir, base_radius=1000.0, provenance
         json.dump({"generated": datetime.date.today().isoformat(),
                    "provenance": [{"label": l, "date": d} for l, d in (provenance or [])],
                    "count": n, "summits": index}, f)
+    if dem_dir:
+        _save_xsec_cache(xsec_cache_path, xsec_cache)
+        log(f"  cross-section SVG cache: {len(xsec_cache)} summits -> {xsec_cache_path}")
     return n
 
 
@@ -1377,6 +1414,11 @@ def main():
                          "de-rate shadowed far sources in the score; with --dem-dir, "
                          "missing pairs are computed and written back. Without a DEM "
                          "the cache is read-only and uncached pairs assume clear LOS.")
+    ap.add_argument("--xsec-cache", metavar="FILE",
+                    help="JSON cache of report-card cross-section SVGs (per summit). "
+                         "With --dem-dir they're computed and written here; without a "
+                         "DEM a monthly rebuild reuses them, keeping cross-sections on "
+                         "a DEM-less box.")
     ap.add_argument("--broadcast-dir",
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
@@ -1460,14 +1502,15 @@ def main():
             p_report = write_report_card(
                 joined, summits, args.report,
                 os.path.join(args.out_dir, args.report.replace("/", "_") + "_report.html"),
-                args.radius, provenance=prov, dem_dir=args.dem_dir)
+                args.radius, provenance=prov, dem_dir=args.dem_dir,
+                xsec_cache_path=args.xsec_cache)
         except ValueError as e:
             log(f"  report: {e}")
 
     n_bundle = 0
     if args.reports_dir and len(joined):
         n_bundle = write_report_bundle(joined, summits, args.reports_dir, args.radius, prov,
-                                       dem_dir=args.dem_dir)
+                                       dem_dir=args.dem_dir, xsec_cache_path=args.xsec_cache)
         log(f"  report bundle: {n_bundle} cards + qrm_index.json -> {args.reports_dir}")
 
     log("\n=== done ===")

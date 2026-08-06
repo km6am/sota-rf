@@ -8,6 +8,10 @@ Environment=SOTA_WFS_ROOT=/opt/sota-rf
 Environment=SOTA_RF_ASSOCIATION=US
 Environment=SOTA_RF_REPORTS_DIR=/opt/sota-matcher/web/rf
 Environment=SOTA_RF_REPORT_BASE=https://km6am.com/rf
+# Report cards are regenerated here monthly from current data, but the terrain/
+# pattern cross-section SVGs (which need the DEM) come from data/xsec_cache.json —
+# built locally and shipped, like the terrain cache. So the monthly rebuild keeps
+# the existing cross-sections without a DEM on this box.
 ExecStart=/opt/sota-rf/.venv/bin/python fetch/fetch_rf_sources.py
 # National rebuild loads ~1.2M sources (uses swap on this box); be patient + gentle.
 TimeoutStartSec=6h

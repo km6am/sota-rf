@@ -123,6 +123,12 @@ def main() -> int:
         tcache = DATA_DIR / "terrain_cache.json"
         if tcache.exists():
             cmd += ["--terrain-cache", str(tcache)]
+        # Cross-section SVG cache (built off-box with the DEM, shipped). Read-only
+        # here — the monthly report rebuild reuses these SVGs so cards keep their
+        # terrain/pattern cross-sections without a DEM on this box.
+        xcache = DATA_DIR / "xsec_cache.json"
+        if xcache.exists():
+            cmd += ["--xsec-cache", str(xcache)]
         subprocess.run(cmd, check=True)
 
         tag = "US" if ASSOCIATION == "US" else ASSOCIATION.replace("/", "_")
