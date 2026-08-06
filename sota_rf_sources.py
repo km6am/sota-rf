@@ -920,22 +920,23 @@ def to_caltopo_summits(summary, joined, path, base_radius=1000.0, report_base=No
         risk = {"HIGH": "High", "MODERATE": "Moderate", "LOW": "Low", "CLEAR": "Clear"}[d["overall"]]
         report_url = (f'{report_base.rstrip("/")}/reports/{code.replace("/", "_")}_report.html'
                       if report_base else None)
+        # ONE representation only: the score-card lives in `description`. CalTopo
+        # (both direct-import and WFS) shows that popup and auto-linkifies a bare
+        # URL inside it, so the report line becomes clickable. Do NOT also emit
+        # risk/total_erp/qrm/report as separate columns — over WFS CalTopo lists
+        # every column too, which duplicated the whole card and left the report a
+        # dead plain-text field.
         lines = [str(s["name"]),
                  f'Risk: {risk}   Total ERP: {human_w(d["total"])}',
                  f'QRM — {qrm}']
         if report_url:
-            lines.append(f'Report: {report_url}')
+            lines += ["Report card:", report_url]   # bare URL on its own line → clickable
         props = {
             "title": code,
             "description": "\n".join(lines),
-            "risk": d["overall"],
-            "total_erp": human_w(d["total"]),
-            "qrm": qrm,
             "marker-color": RISK_COLOR[d["overall"]],
             "marker-symbol": "point",
         }
-        if report_url:
-            props["report"] = report_url
         feats.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [round(s["lon"], 6), round(s["lat"], 6)]},
