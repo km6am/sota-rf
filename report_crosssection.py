@@ -26,7 +26,9 @@ def _cluster_distant_sites(rows, base_radius):
         if p is None or r["dist"] <= base_radius:
             continue
         for s in sites:
-            if abs(r["lat"] - s["lat"]) < 0.0025 and abs(r["lon"] - s["lon"]) < 0.0025:
+            # ~700 m: a broadcast *peak* (e.g. all of Mt Wilson) is one display site,
+            # so its stations don't split into stacked towers on the cross-section
+            if abs(r["lat"] - s["lat"]) < 0.006 and abs(r["lon"] - s["lon"]) < 0.006:
                 s["members"].append(r)
                 break
         else:
@@ -150,9 +152,9 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
     smt_i = next(i for i, a in enumerate(seq) if a[0] == "summit")
     sx_m = xa[smt_i]
 
-    # ---- layout ----
-    W, H = 900, 250
-    PL, PR, PT, PB = 60, 748, 30, 198
+    # ---- layout ----  (H leaves a legend strip below the terrain plot)
+    W, H = 900, 236 + 24 * len(sites)
+    PL, PR, PT, PB = 60, 742, 44, 190
     xmax = cum or 1.0
     hs = [e for _, e in profF] + [s["rc"] for s in sites] + [salt]
     ymax = max(hs) * 1.10 + 12
@@ -167,11 +169,15 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
     xs, ys_ = xx(sx_m), yy(salt)
 
     parts = [f'<path d="{fill}" class="xs-terrain"/><path d="{terr}" class="xs-terrline"/>']
-    # each site: tower + sightline + labels
+    # each site: tower + sightline + a numbered badge (details go in the legend
+    # strip below, so nothing overprints when sites share a bearing)
+    legend = []
+    n = 0
     for i, a in enumerate(seq):
         if a[0] != "site":
             continue
-        s = a[1]; xm = xa[i]; xt = xx(xm)
+        n += 1
+        s = a[1]; xt = xx(xa[i])
         base = dt.elevation(s["lat"], s["lon"], dem_dir)
         if np.isnan(base):
             base = min(hs)
@@ -180,27 +186,36 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
         loss = dt.terrain_loss(summit["lat"], summit["lon"], salt,
                                s["lat"], s["lon"], s["rc"], s["freq"], dem_dir)
         los = "LOS clear" if loss < 6 else f"diffraction &#8722;{loss:.0f} dB"
-        name = str(s["owner"]).split(" (")[0][:18]
-        anc = "start" if xt < xs else "end"
         parts.append(
             f'<line x1="{xt:.1f}" y1="{yb:.1f}" x2="{xt:.1f}" y2="{yr:.1f}" class="xs-tower"/>'
-            f'<circle cx="{xt:.1f}" cy="{yr:.1f}" r="4" class="xs-rc"/>'
             f'<line x1="{xt:.1f}" y1="{yr:.1f}" x2="{xs:.1f}" y2="{ys_:.1f}" class="xs-los"/>'
-            f'<text x="{xt:.1f}" y="{yr-10:.1f}" class="xs-lbl" text-anchor="{anc}">{name}</text>'
-            f'<text x="{xt:.1f}" y="{yr+2:.1f}" class="xs-mut" text-anchor="{anc}">'
-            f'{human_w(s["erp"]) if s["erp"] else ""} &#183; {s["dist"]/1000:.1f} km'
-            f'{(" &#183; " + str(s["n"]) + " stn") if s["n"] > 1 else ""}</text>'
-            f'<text x="{(xt+xs)/2:.1f}" y="{(yr+ys_)/2-5:.1f}" class="xs-los-lbl" '
-            f'text-anchor="middle">{elev:.1f}&#176; &#183; {los}</text>')
-    # summit marker + label
+            f'<circle cx="{xt:.1f}" cy="{yr:.1f}" r="9" class="xs-badge"/>'
+            f'<text x="{xt:.1f}" y="{yr+4:.1f}" class="xs-badgetxt" text-anchor="middle">{n}</text>')
+        name = str(s["owner"]).split(" (")[0][:22]
+        stn = f' &#183; {s["n"]} stn' if s["n"] > 1 else ""
+        legend.append((n, name,
+                       f'{human_w(s["erp"]) if s["erp"] else ""} &#183; {s["dist"]/1000:.1f} km'
+                       f'{stn} &#183; {elev:.1f}&#176; &#183; {los}'))
+    # summit marker + label (anchor inward so it never clips the edge)
+    sanc = "start" if xs < W / 2 else "end"
+    sdx = 8 if sanc == "start" else -8
     parts.append(
-        f'<circle cx="{xs:.1f}" cy="{ys_:.1f}" r="4.6" class="xs-sum"/>'
-        f'<text x="{xs:.1f}" y="{ys_+16:.1f}" class="xs-lbl" text-anchor="middle">'
+        f'<circle cx="{xs:.1f}" cy="{ys_:.1f}" r="5" class="xs-sum"/>'
+        f'<text x="{xs + sdx:.1f}" y="{ys_ + 16:.1f}" class="xs-lbl" text-anchor="{sanc}">'
         f'{summit["code"]} &#183; {salt:.0f} m</text>')
+    # legend strip below the plot — one clean row per numbered site
+    ly = PB + 26
+    for num, name, detail in legend:
+        parts.append(
+            f'<circle cx="{PL + 8:.0f}" cy="{ly - 4:.0f}" r="9" class="xs-badge"/>'
+            f'<text x="{PL + 8:.0f}" y="{ly:.0f}" class="xs-badgetxt" text-anchor="middle">{num}</text>'
+            f'<text x="{PL + 26:.0f}" y="{ly:.0f}" class="xs-legname">{name}'
+            f'<tspan class="xs-legdim" dx="8">{detail}</tspan></text>')
+        ly += 22
 
-    # vertical-pattern glyph for the dominant site (right margin)
+    # vertical-pattern glyph for the dominant site (right margin, above the legend)
     dom = sites[0]
-    gx, gy, R = 812, 92, 42
+    gx, gy, R = 818, 84, 40
     lob = _lobes(dom["bays"], dom["spacing"], R)
     if lob:
         elev = math.degrees(math.atan2(dom["rc"] - salt, dom["dist"]))
