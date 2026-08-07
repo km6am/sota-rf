@@ -91,7 +91,14 @@ def crosssection_svg(d, summit, base_radius, dem_dir, *, vpat_gain, human_w,
              and not np.isnan(s["rc"])][:3]
     if not sites:
         return None
-    return _draw(summit, sites, dem_dir, vpat_gain, human_w)
+    # co-sited: transmitters on the summit itself (within the near zone). Their
+    # combined ERP is shown as a tower + red near-field glow at the summit, so the
+    # plot doesn't read as if the only sources are remote.
+    near = [r for r in rows if r["dist"] <= base_radius and r["p"]]
+    co = dict(erp=sum(r["p"] for r in near),
+              rc=max([r["rc"] for r in near if not np.isnan(r["rc"])], default=np.nan),
+              n=len(near))
+    return _draw(summit, sites, dem_dir, vpat_gain, human_w, co)
 
 
 def _bearing(la1, lo1, la2, lo2):
@@ -120,21 +127,45 @@ def _lobes(bays, sp, R):
     return p(pr), p(pl)
 
 
-def _draw(summit, sites, dem_dir, vpat_gain, human_w):
+def _draw(summit, sites, dem_dir, vpat_gain, human_w, co=None):
     """Polyline transect through the summit and its dominant off-summit sites.
     Sites sharing a bearing sit on one side; opposite bearings straddle the
     summit (San Bruno — Mt Davidson — Sutro), each with its own terrain leg and
     sightline. The dominant site drives the vertical-pattern glyph."""
     salt = summit["alt"]
-    b0 = _bearing(summit["lat"], summit["lon"], sites[0]["lat"], sites[0]["lon"])
+    for s in sites:
+        s["brg"] = _bearing(summit["lat"], summit["lon"], s["lat"], s["lon"])
+    # split sites >90° apart in heading onto opposite sides of the summit...
+    b0 = sites[0]["brg"]
     left, right = [], []
     for s in sites:
-        b = _bearing(summit["lat"], summit["lon"], s["lat"], s["lon"])
-        (right if abs((b - b0 + 180) % 360 - 180) <= 90 else left).append(s)
+        (right if abs((s["brg"] - b0 + 180) % 360 - 180) <= 90 else left).append(s)
+    # ...then orient it so the more-easterly side is on the right (west on the left)
+    mean_e = lambda g: (sum(math.sin(math.radians(s["brg"])) for s in g) / len(g)) if g else 0.0
+    if left and right:
+        if mean_e(right) < mean_e(left):     # put the more-easterly group on the right
+            left, right = right, left
+    else:                                     # all one side: orient by its own E/W
+        grp = right or left
+        left, right = ([], grp) if mean_e(grp) >= 0 else (grp, [])
     left.sort(key=lambda s: -s["dist"]); right.sort(key=lambda s: s["dist"])
     seq = [("site", s) for s in left] + [("summit", None)] + [("site", s) for s in right]
     coords = [(summit["lat"], summit["lon"]) if a[0] == "summit"
               else (a[1]["lat"], a[1]["lon"]) for a in seq]
+    # when the summit sits at an end, extend the terrain past it (~1/8 of the span)
+    # so the peak is inset within the DEM profile, not on its edge
+    smt0 = next(i for i, a in enumerate(seq) if a[0] == "summit")
+    sla, slo = summit["lat"], summit["lon"]
+    ext = (sum(dt._hav(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1])
+               for i in range(len(coords) - 1)) or 1.0) / 7.0
+
+    def _beyond(alat, alon):                  # a point `ext` m past the summit, away from (alat,alon)
+        f = ext / max(dt._hav(alat, alon, sla, slo), 1.0)
+        return (sla + (sla - alat) * f, slo + (slo - alon) * f)
+    if len(seq) > 1 and smt0 == len(seq) - 1:
+        coords.append(_beyond(*coords[smt0 - 1])); seq.append(("ext", None))
+    elif len(seq) > 1 and smt0 == 0:
+        coords.insert(0, _beyond(*coords[1])); seq.insert(0, ("ext", None))
 
     # sample terrain along each leg; record each anchor's cumulative x
     prof, xa, cum = [], [0.0], 0.0
@@ -159,8 +190,8 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
     # collision); the terrain plot and a numbered legend strip follow.
     W, GR, GCY, STAG = 900, 48, 46, 26
     PL, PR = 60, 742
-    xmax = cum or 1.0
-    SX = (PR - PL) / xmax
+    span = cum or 1.0
+    SX = (PR - PL) / span
     xx = lambda m: PL + m * SX
     # beam-glyph height per bay-antenna: at the tower x, dropped in steps to clear
     gpos, plist = {}, []
@@ -185,7 +216,15 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
     fill = terr + f" L{xx(profF[-1][0]):.1f},{PB} L{xx(profF[0][0]):.1f},{PB} Z"
     xs, ys_ = xx(sx_m), yy(salt)
 
+    co = co or {}
+    co_erp = co.get("erp", 0.0) or 0.0
+    yc = (yy(co["rc"] if (co.get("rc") is not None and not np.isnan(co["rc"])) else salt + 45)
+          if co_erp > 0 else ys_)
     parts = [f'<path d="{fill}" class="xs-terrain"/><path d="{terr}" class="xs-terrline"/>']
+    # near-field glow at the summit's own co-sited transmitters — drawn first so it
+    # sits far behind every tower, beam and label
+    if co_erp > 0:
+        parts.append(f'<circle cx="{xs:.1f}" cy="{yc:.1f}" r="84" fill="url(#xsglow)"/>')
     # pass 1: tower + sightline + numbered badge; collect per-site geometry
     info, legend, n = [], [], 0
     for i, a in enumerate(seq):
@@ -236,9 +275,17 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
             f'<g transform="translate({xt:.1f},{gy:.1f})"><path d="{lob[0]}" class="xs-lobe"/>'
             f'<path d="{lob[1]}" class="xs-lobe"/></g>'
             f'<line x1="{xt:.1f}" y1="{gy:.1f}" x2="{rx:.1f}" y2="{ry:.1f}" class="xs-ray"/>'
-            f'<circle cx="{rx:.1f}" cy="{ry:.1f}" r="3.4" class="xs-sum"/>')
+            f'<circle cx="{rx:.1f}" cy="{ry:.1f}" r="3.4" class="xs-sum"/>'
+            f'<text x="{xt:.1f}" y="{gy-GR*0.2-8:.1f}" class="xs-erp" text-anchor="middle">'
+            f'{(human_w(s["erp"]) + " @ " + str(int(round(s["brg"]))) + "&#176;") if s["erp"] else ""}</text>')
 
-    # summit marker + label (anchor inward so it never clips the edge)
+    # co-sited transmitters ON the summit: a tower + total ERP, so the summit reads
+    # as a transmitter site too (not only a victim of remote ones)
+    if co_erp > 0:
+        parts.append(
+            f'<line x1="{xs:.1f}" y1="{ys_:.1f}" x2="{xs:.1f}" y2="{yc:.1f}" class="xs-tower"/>'
+            f'<text x="{xs:.1f}" y="{yc-9:.1f}" class="xs-erp" text-anchor="middle">{human_w(co_erp)}</text>')
+    # summit (receiver) marker + label (anchor inward so it never clips the edge)
     sanc = "start" if xs < W / 2 else "end"
     sdx = 8 if sanc == "start" else -8
     parts.append(
@@ -250,6 +297,13 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
                  f'distance km &#183; vertical exaggeration &#8776;{ve:.0f}&#215; &#183; '
                  f'beam = each site&#8217;s strongest interferer, vertical pattern</text>')
     ly = PB + 40
+    if co_erp > 0:                                    # co-sited row first (red marker)
+        parts.append(
+            f'<circle cx="{PL + 8:.0f}" cy="{ly - 4:.0f}" r="6" class="xs-cored"/>'
+            f'<text x="{PL + 26:.0f}" y="{ly:.0f}" class="xs-legname">On {summit["code"]}'
+            f'<tspan class="xs-legdim" dx="8">{human_w(co_erp)} &#183; {co["n"]} stn '
+            f'&#183; co-sited (near-field)</tspan></text>')
+        ly += 22
     for num, name, detail in legend:
         parts.append(
             f'<circle cx="{PL + 8:.0f}" cy="{ly - 4:.0f}" r="9" class="xs-badge"/>'
@@ -258,6 +312,10 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
             f'<tspan class="xs-legdim" dx="8">{detail}</tspan></text>')
         ly += 22
     H = int(ly + 6)
+    defs = ('<defs><radialGradient id="xsglow">'
+            '<stop offset="0" style="stop-color:var(--high);stop-opacity:.40"/>'
+            '<stop offset="1" style="stop-color:var(--high);stop-opacity:0"/>'
+            '</radialGradient></defs>')
     return (f'<svg viewBox="0 0 {W} {H}" class="xs-fig" xmlns="http://www.w3.org/2000/svg" '
             f'role="img" aria-label="Terrain cross-section for {summit["code"]}">'
-            + "".join(parts) + "</svg>")
+            + defs + "".join(parts) + "</svg>")
