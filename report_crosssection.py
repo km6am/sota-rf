@@ -55,13 +55,15 @@ def _cluster_distant_sites(rows, base_radius):
 
 
 def crosssection_svg(d, summit, base_radius, dem_dir, *, vpat_gain, human_w,
-                     min_share=0.02):
-    """Return an SVG string for the dominant off-summit source, or None.
+                     field_min=0.15):
+    """Return an SVG string for the off-summit sources lighting this summit, or None.
 
     `d` = the summit's join rows (DataFrame); `summit` = dict(lat,lon,alt,code).
-    A figure is drawn only if the richest distant site carries at least
-    `min_share` of the summit's total broadband field — i.e. an off-summit peak
-    genuinely drives the exposure."""
+    A site is shown when its own incident field is ≥ `field_min` V/m (≈ the level
+    that desenses a cheap HT, FIELD_MOD_VM) — an *absolute* test, not a share of
+    the total, so a summit still surfaces its off-site impactors even when co-sited
+    sources dominate its overall field (e.g. San Bruno, whose Sutro-TV field is
+    ~2 V/m though a fraction of its own co-sited farm)."""
     salt = summit["alt"]
     if salt is None or np.isnan(salt):
         return None
@@ -85,7 +87,7 @@ def crosssection_svg(d, summit, base_radius, dem_dir, *, vpat_gain, human_w,
     if total <= 0:
         return None
     sites = _cluster_distant_sites(rows, base_radius)
-    sites = [s for s in sites if s["contrib"] >= min_share * total
+    sites = [s for s in sites if math.sqrt(30.0 * s["contrib"]) >= field_min
              and not np.isnan(s["rc"])][:3]
     if not sites:
         return None
@@ -152,27 +154,40 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
     smt_i = next(i for i, a in enumerate(seq) if a[0] == "summit")
     sx_m = xa[smt_i]
 
-    # ---- layout ----  (H leaves a legend strip below the terrain plot)
-    W, H = 900, 236 + 24 * len(sites)
-    PL, PR, PT, PB = 60, 742, 44, 190
+    # ---- layout ----  a beam glyph sits above each antenna in a top band whose
+    # height is sized to the beam placement (glyphs stagger DOWN, not sideways, on
+    # collision); the terrain plot and a numbered legend strip follow.
+    W, GR, GCY, STAG = 900, 48, 46, 26
+    PL, PR = 60, 742
     xmax = cum or 1.0
+    SX = (PR - PL) / xmax
+    xx = lambda m: PL + m * SX
+    # beam-glyph height per bay-antenna: at the tower x, dropped in steps to clear
+    gpos, plist = {}, []
+    for xt, s in sorted(((xx(xa[i]), a[1]) for i, a in enumerate(seq) if a[0] == "site"),
+                        key=lambda t: t[0]):
+        if np.isnan(s["bays"]) or s["bays"] < 1 or s["spacing"] <= 0:
+            continue
+        gy = GCY
+        for cand in (GCY, GCY + STAG, GCY + 2 * STAG, GCY + 3 * STAG):
+            if not any(abs(xt - px) < 1.85 * GR and abs(cand - py) < 22 for px, py in plist):
+                gy = cand; break
+        plist.append((xt, gy)); gpos[id(s)] = gy
+    PT = int(max((gy for _, gy in plist), default=GCY) + 30)
+    PB = PT + 94
     hs = [e for _, e in profF] + [s["rc"] for s in sites] + [salt]
     ymax = max(hs) * 1.10 + 12
     ymin = min(min(hs) - 25, min(hs) * 0.92)
-    SX = (PR - PL) / xmax
     SY = (PB - PT) / (ymax - ymin)
     ve = SY / SX
-    xx = lambda m: PL + m * SX
     yy = lambda e: PB - (e - ymin) * SY
     terr = "M" + " L".join(f"{xx(x):.1f},{yy(e):.1f}" for x, e in profF)
     fill = terr + f" L{xx(profF[-1][0]):.1f},{PB} L{xx(profF[0][0]):.1f},{PB} Z"
     xs, ys_ = xx(sx_m), yy(salt)
 
     parts = [f'<path d="{fill}" class="xs-terrain"/><path d="{terr}" class="xs-terrline"/>']
-    # each site: tower + sightline + a numbered badge (details go in the legend
-    # strip below, so nothing overprints when sites share a bearing)
-    legend = []
-    n = 0
+    # pass 1: tower + sightline + numbered badge; collect per-site geometry
+    info, legend, n = [], [], 0
     for i, a in enumerate(seq):
         if a[0] != "site":
             continue
@@ -181,21 +196,48 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
         base = dt.elevation(s["lat"], s["lon"], dem_dir)
         if np.isnan(base):
             base = min(hs)
-        yr = yy(s["rc"]); yb = yy(base)
+        yr = yy(s["rc"])
         elev = math.degrees(math.atan2(s["rc"] - salt, s["dist"]))
         loss = dt.terrain_loss(summit["lat"], summit["lon"], salt,
                                s["lat"], s["lon"], s["rc"], s["freq"], dem_dir)
         los = "LOS clear" if loss < 6 else f"diffraction &#8722;{loss:.0f} dB"
+        gain = vpat_gain(s["rc"], salt, s["dist"], s["bays"], s["spacing"], near_floor=0.0)
+        pdb = (10 * math.log10(gain)) if gain > 0 else None
         parts.append(
-            f'<line x1="{xt:.1f}" y1="{yb:.1f}" x2="{xt:.1f}" y2="{yr:.1f}" class="xs-tower"/>'
+            f'<line x1="{xt:.1f}" y1="{yy(base):.1f}" x2="{xt:.1f}" y2="{yr:.1f}" class="xs-tower"/>'
             f'<line x1="{xt:.1f}" y1="{yr:.1f}" x2="{xs:.1f}" y2="{ys_:.1f}" class="xs-los"/>'
             f'<circle cx="{xt:.1f}" cy="{yr:.1f}" r="9" class="xs-badge"/>'
             f'<text x="{xt:.1f}" y="{yr+4:.1f}" class="xs-badgetxt" text-anchor="middle">{n}</text>')
+        info.append((xt, yr, s, elev))
         name = str(s["owner"]).split(" (")[0][:22]
         stn = f' &#183; {s["n"]} stn' if s["n"] > 1 else ""
-        legend.append((n, name,
-                       f'{human_w(s["erp"]) if s["erp"] else ""} &#183; {s["dist"]/1000:.1f} km'
-                       f'{stn} &#183; {elev:.1f}&#176; &#183; {los}'))
+        det = (f'{human_w(s["erp"]) if s["erp"] else ""} &#183; {s["dist"]/1000:.1f} km'
+               f'{stn} &#183; {elev:.1f}&#176; &#183; {los}')
+        if pdb is not None:
+            bv = 0.0 if abs(pdb) < 0.05 else pdb
+            det += f' &#183; beam {bv:.1f} dB'
+        legend.append((n, name, det))
+
+    # pass 2: the beam glyph above each antenna (its strongest interferer's
+    # vertical pattern), at the tower x and its assigned height, summit ray marked.
+    for xt, yr, s, elev in info:
+        if id(s) not in gpos:
+            continue
+        lob = _lobes(s["bays"], s["spacing"], GR)
+        if not lob:
+            continue
+        gy = gpos[id(s)]
+        sign = -1.0 if xs < xt else 1.0     # ray points toward the summit's side
+        rx = xt + sign * GR * 1.12 * math.cos(math.radians(elev))
+        ry = gy + GR * 1.12 * math.sin(math.radians(elev))
+        parts.append(
+            f'<line x1="{xt:.1f}" y1="{gy+13:.1f}" x2="{xt:.1f}" y2="{yr-9:.1f}" class="xs-stem"/>'
+            f'<line x1="{xt-GR*1.1:.1f}" y1="{gy:.1f}" x2="{xt+GR*1.1:.1f}" y2="{gy:.1f}" class="xs-hz"/>'
+            f'<g transform="translate({xt:.1f},{gy:.1f})"><path d="{lob[0]}" class="xs-lobe"/>'
+            f'<path d="{lob[1]}" class="xs-lobe"/></g>'
+            f'<line x1="{xt:.1f}" y1="{gy:.1f}" x2="{rx:.1f}" y2="{ry:.1f}" class="xs-ray"/>'
+            f'<circle cx="{rx:.1f}" cy="{ry:.1f}" r="3.4" class="xs-sum"/>')
+
     # summit marker + label (anchor inward so it never clips the edge)
     sanc = "start" if xs < W / 2 else "end"
     sdx = 8 if sanc == "start" else -8
@@ -203,8 +245,11 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
         f'<circle cx="{xs:.1f}" cy="{ys_:.1f}" r="5" class="xs-sum"/>'
         f'<text x="{xs + sdx:.1f}" y="{ys_ + 16:.1f}" class="xs-lbl" text-anchor="{sanc}">'
         f'{summit["code"]} &#183; {salt:.0f} m</text>')
-    # legend strip below the plot — one clean row per numbered site
-    ly = PB + 26
+
+    parts.append(f'<text x="{PL}" y="{PB + 16:.0f}" class="xs-mut">ELEVATION m &#183; '
+                 f'distance km &#183; vertical exaggeration &#8776;{ve:.0f}&#215; &#183; '
+                 f'beam = each site&#8217;s strongest interferer, vertical pattern</text>')
+    ly = PB + 40
     for num, name, detail in legend:
         parts.append(
             f'<circle cx="{PL + 8:.0f}" cy="{ly - 4:.0f}" r="9" class="xs-badge"/>'
@@ -212,30 +257,7 @@ def _draw(summit, sites, dem_dir, vpat_gain, human_w):
             f'<text x="{PL + 26:.0f}" y="{ly:.0f}" class="xs-legname">{name}'
             f'<tspan class="xs-legdim" dx="8">{detail}</tspan></text>')
         ly += 22
-
-    # vertical-pattern glyph for the dominant site (right margin, above the legend)
-    dom = sites[0]
-    gx, gy, R = 818, 84, 40
-    lob = _lobes(dom["bays"], dom["spacing"], R)
-    if lob:
-        elev = math.degrees(math.atan2(dom["rc"] - salt, dom["dist"]))
-        gain = vpat_gain(dom["rc"], salt, dom["dist"], dom["bays"], dom["spacing"], near_floor=0.0)
-        pdb = 10 * math.log10(gain) if gain > 0 else -30
-        rx = gx + R * 1.15 * math.cos(math.radians(elev))
-        ry = gy + R * 1.15 * math.sin(math.radians(elev))
-        pn = str(dom.get("patt_owner", "")).split(" (")[0][:14]
-        parts.append(
-            f'<text x="{gx}" y="{gy-R-16:.0f}" class="xs-mut" text-anchor="middle">{pn} pattern</text>'
-            f'<line x1="{gx-R*1.1:.0f}" y1="{gy}" x2="{gx+R*1.2:.0f}" y2="{gy}" class="xs-hz"/>'
-            f'<g transform="translate({gx},{gy})"><path d="{lob[0]}" class="xs-lobe"/>'
-            f'<path d="{lob[1]}" class="xs-lobe"/></g>'
-            f'<line x1="{gx}" y1="{gy}" x2="{rx:.1f}" y2="{ry:.1f}" class="xs-ray"/>'
-            f'<circle cx="{rx:.1f}" cy="{ry:.1f}" r="3.4" class="xs-sum"/>'
-            f'<text x="{gx}" y="{gy+R+16:.0f}" class="xs-mut" text-anchor="middle">'
-            f'summit {elev:.1f}&#176; &#183; {pdb:+.1f} dB</text>')
-
-    parts.append(f'<text x="{PL}" y="{PT-12}" class="xs-mut">ELEVATION m &#183; '
-                 f'distance km &#183; vertical exaggeration &#8776;{ve:.0f}&#215;</text>')
+    H = int(ly + 6)
     return (f'<svg viewBox="0 0 {W} {H}" class="xs-fig" xmlns="http://www.w3.org/2000/svg" '
             f'role="img" aria-label="Terrain cross-section for {summit["code"]}">'
             + "".join(parts) + "</svg>")
