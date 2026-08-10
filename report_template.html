@@ -35,7 +35,7 @@
 
   /* scorecard */
   .scorecard{margin-top:26px;padding-top:22px;border-top:1px solid var(--line-strong);
-             display:grid;grid-template-columns:auto auto 1fr;gap:26px 34px;align-items:end;}
+             display:grid;grid-template-columns:auto auto auto 1fr;gap:26px 30px;align-items:end;}
   .stat .k{font-size:11px;letter-spacing:.11em;text-transform:uppercase;color:var(--muted);margin-bottom:5px;}
   .stat .v{font-size:22px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;}
   .risk-word{display:inline-flex;align-items:center;gap:8px;}
@@ -225,7 +225,8 @@ const DATA = /*REPORT_DATA*/;
     document.getElementById("scorecard").innerHTML=`
       <div class="stat risk"><div class="k">Overload risk</div>
         <div class="v risk-word risk-${riskCls}">${riskName}</div></div>
-      <div class="stat"><div class="k">Total ERP</div><div class="v num">${human(DATA.total_erp_w)}</div></div>
+      <div class="stat"><div class="k">Local ERP</div><div class="v num">${human(DATA.local_erp_w)}</div></div>
+      <div class="stat"><div class="k">Remote ERP</div><div class="v num">${human(DATA.remote_erp_w)}</div></div>
       <div class="stat"><div class="k">Field strength</div><div class="v num">≈ ${DATA.field_vm} V/m</div></div>
       <div class="qrm"><span class="k">QRM by band</span>${qrm||"—"}<div class="k" style="margin-top:8px">${src}</div></div>`;
   }

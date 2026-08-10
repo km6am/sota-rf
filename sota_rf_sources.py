@@ -1235,6 +1235,11 @@ def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None, xsec_cache=Non
     overall = _OVERALL_LVL[overall_tier]
     pw = d["rf_max_power_w"]
     total = float(pw.sum(min_count=1)) if pw.notna().any() else None
+    # split reported power into local (co-sited, within the near zone) and remote
+    near = d["distance_m"] <= base_radius
+    _sum = lambda s: (float(s.sum(min_count=1)) if s.notna().any() else None)
+    local_erp = _sum(pw[near])
+    remote_erp = _sum(pw[~near])
 
     def _m(col):
         return None if meta is None or col not in meta or pd.isna(meta[col]) else meta[col]
@@ -1243,7 +1248,8 @@ def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None, xsec_cache=Non
         alt_m=(None if _m("alt_m") is None else float(_m("alt_m"))),
         activations=(None if _m("activations") is None else int(_m("activations"))),
         risk=overall_tier, qrm=_qrm_line(ham_tiers), field_vm=round(_field_vm(field_sum), 1),
-        total_erp_w=total, overall=overall, n=len(d),
+        total_erp_w=total, local_erp_w=local_erp, remote_erp_w=remote_erp,
+        overall=overall, n=len(d),
         n_bcast=n_bcast, n_lm=n_lm, n_uw=n_uw,
         bands=[dict(label=l, lo=lo, hi=hi, p=p) for l, (p, lo, hi) in barp.items()],
         scatter=scatter, ham=ham, emitters=emitters)
