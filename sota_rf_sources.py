@@ -157,8 +157,11 @@ def download(url, dest):
 
 def fix_lines(raw_bytes):
     """FCC dumps embed stray CR/CRLF inside records. Normalise to clean lines.
-    Mirrors the canonical fix: \\r\\r\\n and \\r -> space, \\r\\n -> newline."""
-    return (raw_bytes.replace(b"\r\r\n", b" ")
+    Mirrors the canonical fix: \\r\\r\\n and \\r -> space, \\r\\n -> newline.
+    Also drop embedded NUL bytes, which appear in some FCC snapshots (e.g. an
+    r_tower EN record) and otherwise make csv.reader raise 'line contains NUL'."""
+    return (raw_bytes.replace(b"\x00", b"")
+                     .replace(b"\r\r\n", b" ")
                      .replace(b"\r\n", b"\n")
                      .replace(b"\r", b" "))
 
