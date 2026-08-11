@@ -224,17 +224,21 @@ def _xesc(s):
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
 
-def capabilities_110(base):
+def capabilities_110(base, names=None, endpoint="/geoserver/wfs"):
     """WFS 1.1.0 GetCapabilities — the ONLY version CalTopo's Auto-Configure
     parses, and only in GeoServer's dialect. The quirks below were reverse-
     engineered from CalTopo's parser (thanks km6am): 1.1 namespaces (wfs, ows —
     NOT the 2.0/1.1.1 variants); FeatureType elements in the wfs namespace (via
     the default xmlns); <DefaultSRS> (not DefaultCRS); <ows:Value> directly in
     <ows:Parameter> with NO <ows:AllowedValues> wrapper; and GetFeature must
-    advertise resultType FIRST, outputFormat SECOND (CalTopo reads by position)."""
-    wfs = f"{base}/geoserver/wfs"
+    advertise resultType FIRST, outputFormat SECOND (CalTopo reads by position).
+
+    ``names`` limits which feature types are advertised (default: all); a
+    per-layer ``endpoint`` (e.g. /geoserver/summits/wfs) makes a URL expose a
+    single layer, so CalTopo auto-configures it as its own separate layer."""
+    wfs = f"{base}{endpoint}"
     fts = ""
-    for n in available():
+    for n in (names if names is not None else available()):
         title, abstract, _ = LAYERS[n]
         fts += (f'<FeatureType><Name>{NS}:{n}</Name><Title>{_xesc(title)}</Title>'
                 f'<Abstract>{_xesc(abstract)}</Abstract>'
@@ -266,11 +270,11 @@ def capabilities_110(base):
         '</wfs:WFS_Capabilities>')
 
 
-def capabilities_200(base):
+def capabilities_200(base, names=None, endpoint="/geoserver/wfs"):
     """WFS 2.0.0 GetCapabilities, for non-CalTopo clients that ask for 2.0."""
-    wfs = f"{base}/geoserver/wfs"
+    wfs = f"{base}{endpoint}"
     fts = ""
-    for n in available():
+    for n in (names if names is not None else available()):
         title, abstract, _ = LAYERS[n]
         fts += (f'<wfs:FeatureType><wfs:Name>{NS}:{n}</wfs:Name><wfs:Title>{_xesc(title)}</wfs:Title>'
                 f'<wfs:Abstract>{_xesc(abstract)}</wfs:Abstract>'
@@ -365,17 +369,24 @@ def create_app():
     def wfs(ns=None):
         params = {k.lower(): v for k, v in request.args.items()}
         req = params.get("request", "").lower()
+        # A namespaced path (/geoserver/summits/wfs) pins this endpoint to a
+        # single layer: capabilities advertise only it, and GetFeature serves
+        # only it. That lets CalTopo auto-configure Summits and Sources as two
+        # independent layers. /geoserver/wfs (ns=None) still exposes both.
+        ns_layer = resolve(ns) if ns else None
+        endpoint = f"/geoserver/{ns}/wfs" if ns_layer else "/geoserver/wfs"
+        allowed = [ns_layer] if ns_layer else available()
         try:
             if req == "getcapabilities":
                 version = (params.get("version") or params.get("acceptversions", "").split(",")[0]
                            or "1.1.0").strip()
                 # CalTopo Auto-Configure always asks for 1.1.0 and parses only that.
-                return xml(capabilities_110(base_url()) if version.startswith("1.1")
-                           else capabilities_200(base_url()))
+                return xml(capabilities_110(base_url(), allowed, endpoint) if version.startswith("1.1")
+                           else capabilities_200(base_url(), allowed, endpoint))
             if req == "describefeaturetype":
                 raw = params.get("typenames") or params.get("typename")
-                name = resolve(raw) if raw else (available() or [None])[0]
-                if name is None:
+                name = resolve(raw) if raw else (allowed or [None])[0]
+                if name is None or name not in allowed:
                     raise WfsError("InvalidParameterValue", f"Unknown type name: {raw}", "typeNames")
                 return xml(describe_xml(name))
             if req == "getfeature":
@@ -393,6 +404,8 @@ def create_app():
                     nm = resolve(token)
                     if nm is None:
                         raise WfsError("InvalidParameterValue", f"Unknown type name: {token}", "typeNames")
+                    if nm not in allowed:
+                        continue          # namespaced endpoint ignores other layers
                     if nm not in names:
                         names.append(nm)
                 if not names:
