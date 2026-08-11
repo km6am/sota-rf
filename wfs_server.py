@@ -194,6 +194,29 @@ def select(name, data, bbox, prop_raw, count):
     return fc
 
 
+def merge_collections(fcs):
+    """Concatenate several per-layer FeatureCollections into one (WFS allows a
+    GetFeature to name multiple typeNames; the result is their union). Feature
+    ids are already layer-qualified (``Summits.n``/``Sources.n``) so they stay
+    unique across the merge."""
+    feats = [f for c in fcs for f in c["features"]]
+    matched = sum(c.get("numberMatched", 0) for c in fcs)
+    merged = {
+        "type": "FeatureCollection",
+        "features": feats,
+        "totalFeatures": matched,
+        "numberMatched": matched,
+        "numberReturned": len(feats),
+        "timeStamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}},
+    }
+    if feats:
+        xs = [f["geometry"]["coordinates"][0] for f in feats]
+        ys = [f["geometry"]["coordinates"][1] for f in feats]
+        merged["bbox"] = [min(xs), min(ys), max(xs), max(ys)]
+    return merged
+
+
 # --------------------------------------------------------------------------- #
 # XML documents
 # --------------------------------------------------------------------------- #
@@ -359,21 +382,36 @@ def create_app():
                 raw = params.get("typenames") or params.get("typename")
                 if not raw:
                     raise WfsError("MissingParameterValue", "typeNames is required", "typeNames")
-                name = resolve(raw)
-                if name is None:
+                # A GetFeature may name several feature types (comma-separated) —
+                # CalTopo asks for "rf:Summits,rf:Sources" in one call — and the
+                # response is their merged FeatureCollection (as GeoServer does).
+                names = []
+                for token in raw.split(","):
+                    token = token.strip()
+                    if not token:
+                        continue
+                    nm = resolve(token)
+                    if nm is None:
+                        raise WfsError("InvalidParameterValue", f"Unknown type name: {token}", "typeNames")
+                    if nm not in names:
+                        names.append(nm)
+                if not names:
                     raise WfsError("InvalidParameterValue", f"Unknown type name: {raw}", "typeNames")
                 out_fmt = params.get("outputformat", JSON)
                 if "json" not in out_fmt.lower():
                     raise WfsError("InvalidParameterValue",
                                    f"Only GeoJSON output is supported, got {out_fmt!r}", "outputFormat")
-                data = get_data(name)
-                if data is None:
-                    raise WfsError("NoApplicableCode", f"Data for {NS}:{name} not available")
                 bbox = parse_bbox(params["bbox"]) if params.get("bbox") else None
                 count_raw = params.get("count") or params.get("maxfeatures")
                 count = int(count_raw) if count_raw else None
-                fc = select(name, data, bbox,
-                            params.get("propertyname") or params.get("propertynames"), count)
+                prop = params.get("propertyname") or params.get("propertynames")
+                fcs = []
+                for nm in names:
+                    data = get_data(nm)
+                    if data is None:
+                        raise WfsError("NoApplicableCode", f"Data for {NS}:{nm} not available")
+                    fcs.append(select(nm, data, bbox, prop, count))
+                fc = fcs[0] if len(fcs) == 1 else merge_collections(fcs)
                 return Response(json.dumps(fc, separators=(",", ":")), content_type=JSON)
             raise WfsError("OperationNotSupported" if req else "MissingParameterValue",
                            f"Unsupported request: {params.get('request', '(missing)')}", "request")
