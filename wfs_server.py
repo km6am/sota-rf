@@ -17,12 +17,41 @@ $SOTA_RF_PORT, default 8080) or point a waitress/gunicorn at `create_app()`.
 """
 
 import json
+import math
 import os
 import threading
 import time
 from datetime import datetime, timezone
 
 from flask import Flask, Response, request
+
+# --------------------------------------------------------------------------- #
+# Projection support. Data is stored WGS84 lon/lat (EPSG:4326); CalTopo is a Web
+# Mercator (EPSG:3857) client and picks a CRS from the capabilities, so we
+# advertise both and reproject on demand when a request asks for 3857.
+# --------------------------------------------------------------------------- #
+_R3857 = 6378137.0
+_MERC_TOKENS = ("3857", "900913", "102100", "3785", "54004")
+
+
+def _is_mercator(srs):
+    s = (srs or "").lower()
+    return any(tok in s for tok in _MERC_TOKENS)
+
+
+def _fwd_merc(lon, lat):
+    """WGS84 lon/lat -> EPSG:3857 easting/northing (metres)."""
+    lat = max(min(lat, 85.06), -85.06)
+    x = _R3857 * math.radians(lon)
+    y = _R3857 * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2))
+    return x, y
+
+
+def _inv_merc(x, y):
+    """EPSG:3857 easting/northing (metres) -> WGS84 lon/lat."""
+    lon = math.degrees(x / _R3857)
+    lat = math.degrees(2 * math.atan(math.exp(y / _R3857)) - math.pi / 2)
+    return lon, lat
 
 DATA_DIR = os.environ.get(
     "SOTA_RF_DATA", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
@@ -112,10 +141,13 @@ class WfsError(Exception):
         self.code, self.locator = code, locator
 
 
-def parse_bbox(raw):
-    """WFS BBOX -> (minx, miny, maxx, maxy). CalTopo (VERSION 1.1.0, no CRS
-    token) sends {bottom},{left},{top},{right} = lat-first; a trailing CRS84
-    token means lon-first."""
+def parse_bbox(raw, mercator=False):
+    """WFS BBOX -> (min_lon, min_lat, max_lon, max_lat), always in lon/lat for
+    filtering. A 4326 bbox (CalTopo, VERSION 1.1.0, no CRS token) is
+    {bottom},{left},{top},{right} = lat-first; a trailing CRS84 token means
+    lon-first. A ``mercator`` bbox is EPSG:3857 metres, easting-first
+    ({minx},{miny},{maxx},{maxy}); its corners are inverse-projected to lon/lat.
+    A trailing 3857-style CRS token also forces mercator."""
     parts = [p.strip() for p in raw.split(",")]
     if len(parts) not in (4, 5):
         raise WfsError("InvalidParameterValue", f"BBOX must have 4 values, got {len(parts)}", "bbox")
@@ -123,6 +155,12 @@ def parse_bbox(raw):
         a, b, c, d = (float(p) for p in parts[:4])
     except ValueError:
         raise WfsError("InvalidParameterValue", f"Malformed BBOX: {raw!r}", "bbox")
+    if len(parts) == 5 and _is_mercator(parts[4]):
+        mercator = True
+    if mercator:
+        lon0, lat0 = _inv_merc(a, b)          # easting-first (E, N)
+        lon1, lat1 = _inv_merc(c, d)
+        return (min(lon0, lon1), min(lat0, lat1), max(lon0, lon1), max(lat0, lat1))
     lat_first = not (len(parts) == 5 and "CRS84" in parts[4].upper())
     if lat_first and (abs(a) > 90 or abs(c) > 90):
         lat_first = False                    # values can't be latitudes
@@ -136,7 +174,7 @@ def properties_for(props_keys, raw):
     return raw
 
 
-def select(name, data, bbox, prop_raw, count):
+def select(name, data, bbox, prop_raw, count, mercator=False):
     lons, lats, props = data["lons"], data["lats"], data["props"]
     if bbox is None:
         idx = range(len(lons))
@@ -169,15 +207,21 @@ def select(name, data, bbox, prop_raw, count):
             for k in ALWAYS_SERVED:
                 if k in p:
                     out[k] = p[k]
-        lon, lat = round(lons[i], COORD_DECIMALS), round(lats[i], COORD_DECIMALS)
+        # Output geometry in whatever CRS the client asked for.
+        if mercator:
+            x, y = _fwd_merc(lons[i], lats[i])
+            coord = [round(x, 2), round(y, 2)]
+        else:
+            coord = [round(lons[i], COORD_DECIMALS), round(lats[i], COORD_DECIMALS)]
         feats.append({
             "type": "Feature",
             "id": f"{name}.{i + 1}",
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "geometry": {"type": "Point", "coordinates": coord},
             "geometry_name": "the_geom",
             "properties": out,
-            "bbox": [lon, lat, lon, lat],
+            "bbox": [coord[0], coord[1], coord[0], coord[1]],
         })
+    crs_name = "urn:ogc:def:crs:EPSG::3857" if mercator else "urn:ogc:def:crs:EPSG::4326"
     fc = {
         "type": "FeatureCollection",
         "features": feats,
@@ -185,7 +229,7 @@ def select(name, data, bbox, prop_raw, count):
         "numberMatched": matched,
         "numberReturned": len(feats),
         "timeStamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}},
+        "crs": {"type": "name", "properties": {"name": crs_name}},
     }
     if feats:
         xs = [f["geometry"]["coordinates"][0] for f in feats]
@@ -201,6 +245,8 @@ def merge_collections(fcs):
     unique across the merge."""
     feats = [f for c in fcs for f in c["features"]]
     matched = sum(c.get("numberMatched", 0) for c in fcs)
+    crs = fcs[0]["crs"] if fcs else {"type": "name",
+                                     "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}}
     merged = {
         "type": "FeatureCollection",
         "features": feats,
@@ -208,7 +254,7 @@ def merge_collections(fcs):
         "numberMatched": matched,
         "numberReturned": len(feats),
         "timeStamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::4326"}},
+        "crs": crs,
     }
     if feats:
         xs = [f["geometry"]["coordinates"][0] for f in feats]
@@ -243,6 +289,12 @@ def capabilities_110(base, names=None, endpoint="/geoserver/wfs"):
         fts += (f'<FeatureType><Name>{NS}:{n}</Name><Title>{_xesc(title)}</Title>'
                 f'<Abstract>{_xesc(abstract)}</Abstract>'
                 '<DefaultSRS>urn:ogc:def:crs:EPSG::4326</DefaultSRS>'
+                # Also advertise Web Mercator (CalTopo's native projection) so its
+                # projection-compatibility check passes; the server reprojects on
+                # demand when a request's SRSNAME asks for 3857.
+                '<OtherSRS>urn:ogc:def:crs:EPSG::3857</OtherSRS>'
+                '<OtherSRS>EPSG:4326</OtherSRS>'
+                '<OtherSRS>EPSG:3857</OtherSRS>'
                 '<OutputFormats><Format>application/json</Format></OutputFormats>'
                 '<ows:WGS84BoundingBox><ows:LowerCorner>-180 -90</ows:LowerCorner>'
                 '<ows:UpperCorner>180 90</ows:UpperCorner></ows:WGS84BoundingBox></FeatureType>')
@@ -279,6 +331,7 @@ def capabilities_200(base, names=None, endpoint="/geoserver/wfs"):
         fts += (f'<wfs:FeatureType><wfs:Name>{NS}:{n}</wfs:Name><wfs:Title>{_xesc(title)}</wfs:Title>'
                 f'<wfs:Abstract>{_xesc(abstract)}</wfs:Abstract>'
                 '<wfs:DefaultCRS>urn:ogc:def:crs:EPSG::4326</wfs:DefaultCRS>'
+                '<wfs:OtherCRS>urn:ogc:def:crs:EPSG::3857</wfs:OtherCRS>'
                 '<wfs:OutputFormats><wfs:Format>application/json</wfs:Format></wfs:OutputFormats>'
                 '<ows:WGS84BoundingBox><ows:LowerCorner>-180 -90</ows:LowerCorner>'
                 '<ows:UpperCorner>180 90</ows:UpperCorner></ows:WGS84BoundingBox></wfs:FeatureType>')
@@ -414,7 +467,10 @@ def create_app():
                 if "json" not in out_fmt.lower():
                     raise WfsError("InvalidParameterValue",
                                    f"Only GeoJSON output is supported, got {out_fmt!r}", "outputFormat")
-                bbox = parse_bbox(params["bbox"]) if params.get("bbox") else None
+                # Reproject to EPSG:3857 when the client asks for it (via SRSNAME
+                # or a mercator CRS token on the BBOX); default is WGS84 lon/lat.
+                mercator = _is_mercator(params.get("srsname"))
+                bbox = parse_bbox(params["bbox"], mercator) if params.get("bbox") else None
                 count_raw = params.get("count") or params.get("maxfeatures")
                 count = int(count_raw) if count_raw else None
                 prop = params.get("propertyname") or params.get("propertynames")
@@ -423,7 +479,7 @@ def create_app():
                     data = get_data(nm)
                     if data is None:
                         raise WfsError("NoApplicableCode", f"Data for {NS}:{nm} not available")
-                    fcs.append(select(nm, data, bbox, prop, count))
+                    fcs.append(select(nm, data, bbox, prop, count, mercator))
                 fc = fcs[0] if len(fcs) == 1 else merge_collections(fcs)
                 return Response(json.dumps(fc, separators=(",", ":")), content_type=JSON)
             raise WfsError("OperationNotSupported" if req else "MissingParameterValue",
