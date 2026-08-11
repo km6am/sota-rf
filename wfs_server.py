@@ -288,13 +288,14 @@ def capabilities_110(base, names=None, endpoint="/geoserver/wfs"):
         title, abstract, _ = LAYERS[n]
         fts += (f'<FeatureType><Name>{NS}:{n}</Name><Title>{_xesc(title)}</Title>'
                 f'<Abstract>{_xesc(abstract)}</Abstract>'
-                '<DefaultSRS>urn:ogc:def:crs:EPSG::4326</DefaultSRS>'
-                # Also advertise Web Mercator (CalTopo's native projection) so its
-                # projection-compatibility check passes; the server reprojects on
-                # demand when a request's SRSNAME asks for 3857.
-                '<OtherSRS>urn:ogc:def:crs:EPSG::3857</OtherSRS>'
-                '<OtherSRS>EPSG:4326</OtherSRS>'
+                # CalTopo (a Web Mercator client) judges projection compatibility
+                # off DefaultSRS ONLY and rejects 4326 — it can't reproject in the
+                # WFS beta — so advertise EPSG:3857 as the default and 4326 as an
+                # alternative. The server reprojects output + bbox on demand.
+                '<DefaultSRS>urn:ogc:def:crs:EPSG::3857</DefaultSRS>'
+                '<OtherSRS>urn:ogc:def:crs:EPSG::4326</OtherSRS>'
                 '<OtherSRS>EPSG:3857</OtherSRS>'
+                '<OtherSRS>EPSG:4326</OtherSRS>'
                 '<OutputFormats><Format>application/json</Format></OutputFormats>'
                 '<ows:WGS84BoundingBox><ows:LowerCorner>-180 -90</ows:LowerCorner>'
                 '<ows:UpperCorner>180 90</ows:UpperCorner></ows:WGS84BoundingBox></FeatureType>')
@@ -467,9 +468,16 @@ def create_app():
                 if "json" not in out_fmt.lower():
                     raise WfsError("InvalidParameterValue",
                                    f"Only GeoJSON output is supported, got {out_fmt!r}", "outputFormat")
-                # Reproject to EPSG:3857 when the client asks for it (via SRSNAME
-                # or a mercator CRS token on the BBOX); default is WGS84 lon/lat.
+                # Reproject to EPSG:3857 when the client asks for it — via SRSNAME,
+                # a mercator CRS token on the BBOX, or (CalTopo omits SRSNAME) a
+                # BBOX whose magnitude can only be metres, not degrees.
                 mercator = _is_mercator(params.get("srsname"))
+                if not mercator and params.get("bbox"):
+                    try:
+                        if max(abs(float(v)) for v in params["bbox"].split(",")[:4]) > 180.0:
+                            mercator = True
+                    except ValueError:
+                        pass
                 bbox = parse_bbox(params["bbox"], mercator) if params.get("bbox") else None
                 count_raw = params.get("count") or params.get("maxfeatures")
                 count = int(count_raw) if count_raw else None
