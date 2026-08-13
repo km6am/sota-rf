@@ -1432,6 +1432,18 @@ def main():
                     help="dir holding pre-downloaded CDBS media zips "
                          "(facility.zip, fm_eng_data.zip, tv_eng_data.zip, "
                          "am_eng_data.zip, am_ant_sys.zip); skips their download")
+    ap.add_argument("--ref-layer", action="store_true",
+                    help="also export <TAG>_summits_ref.geojson: the reference SOTA "
+                         "summit layer (jeffkowalski's WFS, markers kept) enriched with "
+                         "our report link + RFI summary, plus a DEM activation-zone "
+                         "polygon per summit. Single-association only.")
+    ap.add_argument("--ref-wfs", metavar="URL", default=None,
+                    help="base URL of the reference sota-wfs server (default: the "
+                         "known ngrok endpoint in ref_summits.REF_WFS)")
+    ap.add_argument("--az-cache", metavar="FILE",
+                    help="JSON cache of activation-zone polygons (per SummitCode). "
+                         "With --dem-dir they're computed and written here; without a "
+                         "DEM a rebuild reuses them, keeping AZ on a DEM-less box.")
     args = ap.parse_args()
 
     os.makedirs(args.data_dir, exist_ok=True)
@@ -1521,6 +1533,48 @@ def main():
         n_bundle = write_report_bundle(joined, summits, args.reports_dir, args.radius, prov,
                                        dem_dir=args.dem_dir, xsec_cache_path=args.xsec_cache)
         log(f"  report bundle: {n_bundle} cards + qrm_index.json -> {args.reports_dir}")
+
+    p_ref = None
+    if args.ref_layer:
+        import ref_summits
+        if args.us:
+            log("  ref-layer: skipped (single-association only)")
+        elif not len(summits):
+            log("  ref-layer: no summits")
+        else:
+            # per-summit RFI summary: reuse the report bundle's qrm_index if present,
+            # else compute it here (no DEM -> no cross-section, so it's cheap).
+            qrm_by_code = {}
+            qi = os.path.join(args.reports_dir, "qrm_index.json") if args.reports_dir else None
+            if qi and os.path.exists(qi):
+                with open(qi, encoding="utf-8") as f:
+                    qrm_by_code = json.load(f).get("summits", {})
+            elif len(joined):
+                meta_by = summits.set_index("summit")
+                risk_map = {"high": "HIGH", "caution": "MODERATE", "low": "LOW", "clear": "CLEAR"}
+                for code, d in joined.groupby("summit"):
+                    meta = meta_by.loc[code] if code in meta_by.index else None
+                    if meta is not None and getattr(meta, "ndim", 1) > 1:
+                        meta = meta.iloc[0]
+                    data = _report_data(d, meta, code, args.radius)
+                    q = _qrm(data)
+                    qrm_by_code[code] = dict(
+                        risk=risk_map[data["overall"]], qrm=q["text"],
+                        total_erp_w=data["total_erp_w"],
+                        report="reports/" + code.replace("/", "_") + "_report.html")
+            bbox = (float(summits["lat"].min()), float(summits["lon"].min()),
+                    float(summits["lat"].max()), float(summits["lon"].max()))
+            p_ref = os.path.join(args.out_dir, f"{tag}_summits_ref.geojson")
+            try:
+                n_ref, n_az = ref_summits.build_ref_layer(
+                    args.association, bbox, qrm_by_code, p_ref,
+                    report_base=args.report_base_url, dem_dir=args.dem_dir,
+                    az_cache_path=args.az_cache,
+                    ref_base=args.ref_wfs or ref_summits.REF_WFS, log=log)
+                log(f"  ref-layer: {n_ref} summits + {n_az} activation zones -> {p_ref}")
+            except Exception as e:                       # noqa: BLE001
+                log(f"  ref-layer: failed ({e})")
+                p_ref = None
 
     log("\n=== done ===")
     if prov:
