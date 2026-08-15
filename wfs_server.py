@@ -71,6 +71,13 @@ LAYERS = {
     "Sources": ("SOTA RF Sources",
                 "Individual fixed RF sources (FCC ASR + ULS + CDBS) near SOTA summits, coloured by ERP.",
                 "rf_sources.geojson"),
+    "RefSummits": ("SOTA Summits (RF-enriched)",
+                   "Reference SOTA summits (original markers kept) with our RF report-card "
+                   "link + RFI summary added to each summit's detail.",
+                   "rf_refsummits.geojson"),
+    "RefZones": ("SOTA Activation Zones",
+                 "25 m activation-zone polygons per summit, tinted by RF overload risk.",
+                 "rf_refzones.geojson"),
 }
 
 _cache = {}          # name -> (data, mtime, checked_at)
@@ -84,21 +91,41 @@ def _path(name):
     return os.path.join(DATA_DIR, LAYERS[name][2])
 
 
+def _coords_xy(coords, xs, ys):
+    """Collect all (x, y) pairs from an arbitrary GeoJSON coordinate nesting."""
+    if not coords:
+        return
+    if isinstance(coords[0], (int, float)):
+        if coords[0] is not None and coords[1] is not None:
+            xs.append(float(coords[0])); ys.append(float(coords[1]))
+        return
+    for c in coords:
+        _coords_xy(c, xs, ys)
+
+
+def _map_coords(coords, fn):
+    """Rebuild a coordinate nesting with fn applied to each (x, y) leaf."""
+    if coords and isinstance(coords[0], (int, float)):
+        return list(fn(coords[0], coords[1]))
+    return [_map_coords(c, fn) for c in coords]
+
+
 def _load(path):
     with open(path, encoding="utf-8") as f:
         fc = json.load(f)
-    lons, lats, props = [], [], []
+    feats = []
     for feat in fc.get("features", []):
         geom = feat.get("geometry") or {}
-        if geom.get("type") != "Point":
+        coords = geom.get("coordinates")
+        if not geom.get("type") or not coords:
             continue
-        c = geom.get("coordinates") or []
-        if len(c) < 2 or c[0] is None or c[1] is None:
+        xs, ys = [], []
+        _coords_xy(coords, xs, ys)
+        if not xs:
             continue
-        lons.append(float(c[0]))
-        lats.append(float(c[1]))
-        props.append(feat.get("properties") or {})
-    return {"lons": lons, "lats": lats, "props": props}
+        feats.append({"geom": geom, "props": feat.get("properties") or {},
+                      "bbox": (min(xs), min(ys), max(xs), max(ys))})
+    return {"feats": feats}
 
 
 def get_data(name):
@@ -175,13 +202,14 @@ def properties_for(props_keys, raw):
 
 
 def select(name, data, bbox, prop_raw, count, mercator=False):
-    lons, lats, props = data["lons"], data["lats"], data["props"]
+    entries = data["feats"]
     if bbox is None:
-        idx = range(len(lons))
+        idx = range(len(entries))
     else:
         minx, miny, maxx, maxy = bbox
-        idx = [i for i in range(len(lons))
-               if minx <= lons[i] <= maxx and miny <= lats[i] <= maxy]
+        idx = [i for i, e in enumerate(entries)              # bbox-overlap (works for any geometry)
+               if not (e["bbox"][2] < minx or e["bbox"][0] > maxx
+                       or e["bbox"][3] < miny or e["bbox"][1] > maxy)]
     idx = list(idx)
     matched = len(idx)
     if count is not None:
@@ -192,9 +220,15 @@ def select(name, data, bbox, prop_raw, count, mercator=False):
         want = [p.strip() for p in prop_raw.split(",")
                 if p.strip() and p.strip().lower() != "the_geom"]
 
-    feats = []
+    if mercator:
+        project = lambda x, y: (round(_fwd_merc(x, y)[0], 2), round(_fwd_merc(x, y)[1], 2))
+    else:
+        project = lambda x, y: (round(x, COORD_DECIMALS), round(y, COORD_DECIMALS))
+
+    feats, fxs, fys = [], [], []
     for i in idx:
-        p = props[i]
+        e = entries[i]
+        p = e["props"]
         if want is None:
             out = dict(p)
         else:
@@ -207,19 +241,18 @@ def select(name, data, bbox, prop_raw, count, mercator=False):
             for k in ALWAYS_SERVED:
                 if k in p:
                     out[k] = p[k]
-        # Output geometry in whatever CRS the client asked for.
-        if mercator:
-            x, y = _fwd_merc(lons[i], lats[i])
-            coord = [round(x, 2), round(y, 2)]
-        else:
-            coord = [round(lons[i], COORD_DECIMALS), round(lats[i], COORD_DECIMALS)]
+        geom = e["geom"]
+        coords = _map_coords(geom["coordinates"], project)
+        gxs, gys = [], []
+        _coords_xy(coords, gxs, gys)
+        fxs += [min(gxs), max(gxs)]; fys += [min(gys), max(gys)]
         feats.append({
             "type": "Feature",
             "id": f"{name}.{i + 1}",
-            "geometry": {"type": "Point", "coordinates": coord},
+            "geometry": {"type": geom["type"], "coordinates": coords},
             "geometry_name": "the_geom",
             "properties": out,
-            "bbox": [coord[0], coord[1], coord[0], coord[1]],
+            "bbox": [min(gxs), min(gys), max(gxs), max(gys)],
         })
     crs_name = "urn:ogc:def:crs:EPSG::3857" if mercator else "urn:ogc:def:crs:EPSG::4326"
     fc = {
@@ -232,9 +265,7 @@ def select(name, data, bbox, prop_raw, count, mercator=False):
         "crs": {"type": "name", "properties": {"name": crs_name}},
     }
     if feats:
-        xs = [f["geometry"]["coordinates"][0] for f in feats]
-        ys = [f["geometry"]["coordinates"][1] for f in feats]
-        fc["bbox"] = [min(xs), min(ys), max(xs), max(ys)]
+        fc["bbox"] = [min(fxs), min(fys), max(fxs), max(fys)]
     return fc
 
 
@@ -256,10 +287,10 @@ def merge_collections(fcs):
         "timeStamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "crs": crs,
     }
-    if feats:
-        xs = [f["geometry"]["coordinates"][0] for f in feats]
-        ys = [f["geometry"]["coordinates"][1] for f in feats]
-        merged["bbox"] = [min(xs), min(ys), max(xs), max(ys)]
+    bboxes = [c["bbox"] for c in fcs if c.get("bbox")]
+    if bboxes:
+        merged["bbox"] = [min(b[0] for b in bboxes), min(b[1] for b in bboxes),
+                          max(b[2] for b in bboxes), max(b[3] for b in bboxes)]
     return merged
 
 
@@ -362,12 +393,21 @@ def _feature_columns(name):
     handling off these, not off a lone the_geom."""
     data = get_data(name)
     keys, seen = [], set()
-    for p in (data["props"][:500] if data else []):
-        for k in p:
+    for e in (data["feats"][:500] if data else []):
+        for k in e["props"]:
             if k not in seen:
                 seen.add(k)
                 keys.append(k)
     return keys
+
+
+def _geom_prop_type(name):
+    """gml geometry property type for a layer, from its first feature."""
+    data = get_data(name)
+    gtype = data["feats"][0]["geom"]["type"] if data and data["feats"] else "Point"
+    return {"Polygon": "gml:SurfacePropertyType",
+            "MultiPolygon": "gml:MultiSurfacePropertyType",
+            "LineString": "gml:CurvePropertyType"}.get(gtype, "gml:PointPropertyType")
 
 
 def describe_xml(name):
@@ -386,7 +426,7 @@ def describe_xml(name):
         f'<xsd:complexType name="{name}Type"><xsd:complexContent>'
         '<xsd:extension base="gml:AbstractFeatureType"><xsd:sequence>'
         f'{fields}'
-        '<xsd:element name="the_geom" minOccurs="0" nillable="true" type="gml:PointPropertyType"/>'
+        f'<xsd:element name="the_geom" minOccurs="0" nillable="true" type="{_geom_prop_type(name)}"/>'
         '</xsd:sequence></xsd:extension></xsd:complexContent></xsd:complexType></xsd:schema>')
 
 

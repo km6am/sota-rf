@@ -282,9 +282,17 @@ def build_ref_layer(assoc, bbox, qrm_by_code, out_path, report_base=None,
     if az_cache_path and n_new:
         _save_az_cache(az_cache_path, az_cache)
     log(f"  activation zones: {n_az} drawn ({n_new} newly computed), RFI enriched: {n_rfi}")
-    fc = {"type": "FeatureCollection", "features": feats}
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(fc, f)
+
+    def _dump(fname, geom_types):
+        with open(fname, "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection",
+                       "features": [x for x in feats if x["geometry"]["type"] in geom_types]}, f)
+
+    _dump(out_path, ("Point", "Polygon"))                # combined, for one-off import
+    # split point/polygon files the WFS server serves as rf:RefSummits / rf:RefZones
+    d = os.path.dirname(out_path) or "."
+    _dump(os.path.join(d, "rf_refsummits.geojson"), ("Point",))
+    _dump(os.path.join(d, "rf_refzones.geojson"), ("Polygon",))
     return len(ref), n_az
 
 
