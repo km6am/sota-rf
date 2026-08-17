@@ -200,6 +200,19 @@ the end), but the indices above are verified against the real files.
   per licence. Powered-but-unbinnable ERP (TV ch>36, blank freq) → `unknown
   freq` line.
 
+## Data sources beyond FCC
+- **NOAA Weather Radio (NWR) — DONE.** Federal (NWS/NTIA), so absent from all FCC
+  data — a 162.400–162.550 MHz blind spot beside 2 m. `load_noaa()` parses the
+  NWS's own `ccl-data.js` (callsign, decimal lat/lon, freq, power W; `source_db=NOAA`,
+  `services=NWR`). ~1014 live tx; `--no-noaa`/`--noaa-file` toggle; fetched monthly.
+  Verified: KWO37 sits on Mt Lukens (121 m) → drives its 2 m QRM to High.
+- **Federal blind-spot survey (for future work).** Next best add = **FAA NAVAIDs**
+  (VOR/VORTAC/TACAN/DME/ILS) via the FAA **NASR** 28-day nav file — public, has
+  coords+freq+class, mountaintop-sited; DME/TACAN 960–1215 MHz sits by 23 cm.
+  Optional: NEXRAD/ASR/ARSR radar (public, high-power, band-distant). **Irreducible
+  gaps** (NTIA Government Master File is restricted): military/DoD and federal
+  land-mobile (USFS/BLM/NPS/DHS) — document, never imply "nothing here."
+
 ## Roadmap / next tasks
 1. ~~**Run W6 live** and sanity-check.~~ **DONE** — see Current status.
 2. ~~**Add microwave**~~ **DONE** — `l_micro.zip` added to `URLS["uls"]`; it
