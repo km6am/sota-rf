@@ -17,3 +17,4 @@ __pycache__/
 *_report.html
 data/
 *_summits_ref.geojson
+ccl-data.js

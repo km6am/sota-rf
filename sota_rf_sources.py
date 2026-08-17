@@ -70,6 +70,11 @@ URLS = {
         "am_eng_data": "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/am_eng_data.zip",
         "am_ant_sys":  "https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/am_ant_sys.zip",
     },
+    # NOAA Weather Radio (NWR). Federal (NWS/NTIA), so it's absent from every FCC
+    # dataset above — a 162.400-162.550 MHz (adjacent to 2 m) blind spot. This is
+    # the NWS's own transmitter data (callsign, decimal lat/lon, freq, power W)
+    # behind their station-search map.
+    "noaa": "https://www.weather.gov/source/nwr/JS/ccl-data.js",
 }
 
 # US SOTA association-code prefixes. A summit is "US" when its association (the
@@ -579,6 +584,53 @@ def load_broadcast(facility_zip, fm_zip, tv_zip, am_eng_zip, am_ant_zip):
 # --------------------------------------------------------------------------- #
 # Merge + spatial join
 # --------------------------------------------------------------------------- #
+NOAA_STATUS_LIVE = {"NORMAL", "DEGRADED"}          # skip "OUT OF SERVICE"
+
+
+def load_noaa(js_path):
+    """Parse the NWS NOAA Weather Radio transmitter dataset (`ccl-data.js`, the
+    JSON array behind weather.gov's station-search map) into unified RF-source
+    rows. NWR is federal (NWS/NTIA), so it never appears in the FCC ASR/ULS/CDBS
+    files — this fills a 162.400-162.550 MHz blind spot right beside the 2 m ham
+    band. Each record carries a callsign, decimal lat/lon, freq (MHz) and power
+    (watts, used directly as ERP — no kW conversion, unlike broadcast)."""
+    raw = open(js_path, encoding="utf-8", errors="replace").read()
+    m = re.search(r"cclData\s*=\s*(\[.*\])", raw, re.S)
+    if not m:
+        log("  NOAA: could not parse ccl-data.js (unexpected format)")
+        return None
+    data = json.loads(m.group(1))
+    rows = []
+    for d in data:
+        if (d.get("status") or "").strip().upper() not in NOAA_STATUS_LIVE:
+            continue
+        lat, lon = to_float(d.get("lat")), to_float(d.get("lon"))
+        if np.isnan(lat) or np.isnan(lon):
+            continue
+        fq = to_float(d.get("freq"))
+        cs = (d.get("callsign") or "").strip()
+        where = ", ".join(p for p in ((d.get("sitename") or d.get("siteloc") or "").strip(),
+                                      (d.get("sitestate") or "").strip()) if p)
+        pw = to_float(d.get("power"))
+        rows.append(dict(
+            source_db="NOAA",
+            ref=cs,
+            owner=(f"{cs} ({where})" if where else cs) or "NOAA Weather Radio",
+            lat=lat, lon=lon,
+            struct_type="",
+            height_agl_m=np.nan, height_amsl_m=np.nan,
+            freqs_mhz=("" if np.isnan(fq) else f"{fq:g}"),
+            max_power_w=(np.nan if (np.isnan(pw) or pw <= 0) else pw),  # power in watts
+            services="NWR",                            # NOAA Weather Radio
+            link_reg="",
+            bays=np.nan, spacing=np.nan,
+            loc_name=where,
+        ))
+    df = pd.DataFrame(rows)
+    log(f"  NOAA weather radio transmitters (live): {len(df)}")
+    return df
+
+
 COLS = ["source_db", "ref", "owner", "lat", "lon", "struct_type",
         "height_agl_m", "height_amsl_m", "freqs_mhz", "max_power_w",
         "services", "link_reg", "bays", "spacing"]
@@ -1404,6 +1456,9 @@ def main():
                     help="ASR structures only (skip the frequency/power layer)")
     ap.add_argument("--no-broadcast", action="store_true",
                     help="skip the FM/TV/AM broadcast layer (CDBS media files)")
+    ap.add_argument("--no-noaa", action="store_true",
+                    help="skip the NOAA Weather Radio (NWR) layer")
+    ap.add_argument("--noaa-file", help="pre-downloaded ccl-data.js path")
     ap.add_argument("--report", metavar="SUMMIT",
                     help="also write a standalone HTML report card for this summit "
                          "code (e.g. W6/CC-072) to the output dir")
@@ -1459,17 +1514,17 @@ def main():
             return dest if os.path.exists(dest) else None
         return download(url, dest)
 
-    log("[1/5] summits")
+    log("[1/6] summits")
     sfile = fetch(URLS["summits"], "summitslist.csv", args.summits_file)
     summits = load_summits(sfile, prefixes)
 
-    log("[2/5] ASR structures")
+    log("[2/6] ASR structures")
     afile = fetch(URLS["asr"], "r_tower.zip", args.asr_file)
     asr = load_asr(afile)
 
     uls, ufiles = None, []
     if not args.no_uls:
-        log("[3/5] ULS land-mobile + microwave (freq + power)")
+        log("[3/6] ULS land-mobile + microwave (freq + power)")
         ufiles = args.uls_file or [fetch(u, os.path.basename(u), None)
                                    for u in URLS["uls"]]
         ufiles = [u for u in ufiles if u and os.path.exists(u)]
@@ -1480,7 +1535,7 @@ def main():
 
     bcast, bfiles = None, []
     if not args.no_broadcast:
-        log("[4/5] broadcast FM/TV/AM (CDBS media)")
+        log("[4/6] broadcast FM/TV/AM (CDBS media)")
         if args.broadcast_dir:
             bf = {k: os.path.join(args.broadcast_dir, os.path.basename(u))
                   for k, u in URLS["broadcast"].items()}
@@ -1497,8 +1552,17 @@ def main():
                        if not (bf[k] and os.path.exists(bf[k]))]
             log(f"  (broadcast files missing: {missing}; skipping FM/TV/AM)")
 
-    log("[5/5] merge + spatial join")
-    rf = merge_sources(asr, uls, bcast)
+    noaa = None
+    if not args.no_noaa:
+        log("[5/6] NOAA weather radio (NWR, federal — not in FCC data)")
+        nfile = fetch(URLS["noaa"], "ccl-data.js", args.noaa_file)
+        if nfile and os.path.exists(nfile):
+            noaa = load_noaa(nfile)
+        else:
+            log("  (ccl-data.js not available; skipping NOAA weather radio)")
+
+    log("[6/6] merge + spatial join")
+    rf = merge_sources(asr, uls, bcast, noaa)
     joined = spatial_join(summits, rf, args.radius)
     joined = apply_terrain(joined, dem_dir=args.dem_dir,
                            cache_path=args.terrain_cache, base_radius=args.radius)

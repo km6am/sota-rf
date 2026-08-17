@@ -56,6 +56,9 @@ FCC_FILES = [
     ("https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/tv_eng_data.zip", "tv_eng_data.zip", True),
     ("https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/am_eng_data.zip", "am_eng_data.zip", True),
     ("https://transition.fcc.gov/Bureaus/MB/Databases/cdbs/am_ant_sys.zip",  "am_ant_sys.zip",  True),
+    # NOAA Weather Radio transmitters (federal; not in FCC data). Small JS file,
+    # refreshed by the NWS — conditional-GET like the ULS/summits files.
+    ("https://www.weather.gov/source/nwr/JS/ccl-data.js",                    "ccl-data.js",  False),
 ]
 
 
