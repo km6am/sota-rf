@@ -101,6 +101,18 @@
   .owner{font-weight:600;} .svc{color:var(--muted);} td.freq{color:var(--muted);font-variant-numeric:tabular-nums;}
   .far{color:var(--faint);}
   .scroll{max-height:none;}
+  /* sortable headers + band-click highlight */
+  th.sort{cursor:pointer;user-select:none;white-space:nowrap;}
+  th.sort:hover{color:var(--ink);}
+  th.sort.act{color:var(--ink);}
+  th.sort .arw{font-size:9px;margin-left:4px;color:var(--muted);}
+  th.sort.act .arw{color:var(--ink);}
+  tbody tr.hl td{background:rgba(192,110,55,.16);}
+  tbody tr.dim{opacity:.3;}
+  #spectrum rect.bd{cursor:pointer;}
+  #spectrum rect.bd.sel{stroke:var(--ink);stroke-width:1.5;}
+  .bandsel{color:var(--ink);cursor:pointer;}
+  .bandsel .x{color:var(--muted);font-weight:700;margin-left:4px;}
 
   /* footer */
   .rpt-foot{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);}
@@ -133,7 +145,13 @@
 
   <h2 class="sec">Emitters in range<span class="count" id="t-count"></span></h2>
   <div class="tbl"><table>
-    <thead><tr><th>Emitter</th><th>Service</th><th>Freq</th><th class="r">ERP</th><th class="r">Distance</th></tr></thead>
+    <thead><tr>
+      <th class="sort" data-k="owner">Emitter<span class="arw"></span></th>
+      <th class="sort" data-k="svc">Service<span class="arw"></span></th>
+      <th class="sort" data-k="f">Freq<span class="arw"></span></th>
+      <th class="sort r" data-k="p">ERP<span class="arw"></span></th>
+      <th class="sort r" data-k="d">Distance<span class="arw"></span></th>
+    </tr></thead>
     <tbody id="emitters"></tbody>
   </table></div>
 
@@ -163,6 +181,31 @@ const DATA = /*REPORT_DATA*/;
   const css=k=>getComputedStyle(document.documentElement).getPropertyValue(k).trim();
   const human=w=>w==null?"—":w>=1e6?(w/1e6).toFixed(2)+" MW":w>=1e3?Math.round(w/1e3)+" kW":Math.round(w)+" W";
   const cleanF=f=>(!f||f==="nan")?"—":f;
+  // --- table sort + band-filter state (numeric sort keys, so MW/kW/W and
+  //     m/km compare by the underlying value, never by the formatted string) ---
+  let sortKey="p", sortDir=-1, selBand=null;      // default: ERP descending
+  const LABELS={owner:"name",svc:"service",f:"freq",p:"ERP",d:"distance"};
+  const freqRange=f=>{                            // "461.8–475.8 (5)" -> [461.8,475.8]
+    if(f==null) return null;
+    const m=String(f).replace(/\s*\(\d+\)\s*$/,"").match(/\d+(?:\.\d+)?/g);
+    if(!m) return null;
+    const v=m.map(Number);
+    return [Math.min(...v),Math.max(...v)];
+  };
+  const sortVal=(e,k)=>{
+    if(k==="owner"||k==="svc") return (e[k]||"").toLowerCase();
+    if(k==="f"){const r=freqRange(e.f);return r?r[0]:null;}
+    return e[k]==null?null:e[k];                  // p (watts), d (metres): raw numbers
+  };
+  const sortedEmitters=()=>{
+    return (DATA.emitters||[]).slice().sort((a,b)=>{
+      const va=sortVal(a,sortKey),vb=sortVal(b,sortKey);
+      const na=(va==null||va===""),nb=(vb==null||vb==="");
+      if(na&&nb) return 0; if(na) return 1; if(nb) return -1;   // blanks always last
+      const c=(typeof va==="string")?va.localeCompare(vb):(va-vb);
+      return c*sortDir;
+    });
+  };
   // restrained thermal ramp keyed to the risk palette (slate -> amber -> brick),
   // so power reads as heat without the neon look.
   const isDark=()=>{const t=document.documentElement.getAttribute("data-theme");return t?t==="dark":matchMedia("(prefers-color-scheme: dark)").matches;};
@@ -190,11 +233,22 @@ const DATA = /*REPORT_DATA*/;
       svg.appendChild(el("line",{x1:x,x2:x,y1:y1,y2:y0,stroke:faint,"stroke-width":1,"stroke-dasharray":"2 3",opacity:.7}));
       if(x-lastLabelX>=17){ svg.appendChild(txt({x,y:y1-6,fill:muted,"font-size":9.5,"text-anchor":"middle"},h.b)); lastLabelX=x; }
     });
-    // band ERP bars (single calm colour)
+    // band ERP bars (single calm colour) — click to highlight that band's emitters
     (DATA.bands||[]).forEach(bd=>{
       if(!(bd.p>0)) return;
       const xa=fx(Math.max(bd.lo,FMIN)),xb=fx(Math.min(bd.hi,FMAX)),w=Math.max(xb-xa,2.5),yTop=py(bd.p);
-      svg.appendChild(el("rect",{x:xa,y:yTop,width:w,height:y0-yTop,rx:1.5,fill:heat(pt(bd.p)),opacity:.82}));
+      const sel=selBand&&selBand.lo===bd.lo&&selBand.hi===bd.hi;
+      const rect=el("rect",{x:xa,y:yTop,width:w,height:y0-yTop,rx:1.5,fill:heat(pt(bd.p)),
+                            opacity:sel?1:.82,class:"bd"+(sel?" sel":"")});
+      const ti=el("title",{}); ti.textContent=`${bd.label} — ${human(bd.p)} · click to highlight`;
+      rect.appendChild(ti);
+      rect.addEventListener("click",()=>{
+        selBand=sel?null:{lo:bd.lo,hi:bd.hi,label:bd.label};
+        draw(); table();
+        if(selBand){const h=document.querySelector("#emitters tr.hl");
+          if(h) h.scrollIntoView({behavior:"smooth",block:"center"});}
+      });
+      svg.appendChild(rect);
     });
     // individual emitters
     (DATA.scatter||[]).forEach(([f,p])=>{
@@ -232,15 +286,34 @@ const DATA = /*REPORT_DATA*/;
   }
 
   function table(){
-    document.getElementById("emitters").innerHTML=(DATA.emitters||[]).map(e=>`
-      <tr>
+    const rows=sortedEmitters();
+    document.getElementById("emitters").innerHTML=rows.map(e=>{
+      let cls="";
+      if(selBand){const r=freqRange(e.f);
+        cls=(r&&r[0]<=selBand.hi&&r[1]>=selBand.lo)?" class=\"hl\"":" class=\"dim\"";}
+      return `<tr${cls}>
         <td><span class="owner">${e.owner||"—"}</span></td>
         <td class="svc">${e.svc||"—"}</td>
         <td class="freq">${cleanF(e.f)}</td>
         <td class="r">${human(e.p)}</td>
         <td class="r">${e.d!=null?Math.round(e.d)+" m"+(e.far?` <span class="far">(${(e.d/1000).toFixed(1)} km)</span>`:""):"—"}</td>
-      </tr>`).join("");
-    document.getElementById("t-count").textContent=` — ${(DATA.emitters||[]).length}, by ERP`;
+      </tr>`;}).join("");
+    // header sort indicators
+    document.querySelectorAll("th.sort").forEach(th=>{
+      const act=th.dataset.k===sortKey;
+      th.classList.toggle("act",act);
+      th.querySelector(".arw").textContent=act?(sortDir<0?"▼":"▲"):"";
+    });
+    // count line: total, current sort, and the active band filter (click to clear)
+    const c=document.getElementById("t-count");
+    c.textContent=` — ${rows.length}, by ${LABELS[sortKey]} ${sortDir<0?"↓":"↑"}`;
+    if(selBand){
+      const b=document.createElement("span"); b.className="bandsel";
+      b.innerHTML=` · ${selBand.label}<span class="x">×</span>`;
+      b.title="clear band highlight";
+      b.onclick=()=>{selBand=null; draw(); table();};
+      c.appendChild(b);
+    }
   }
 
   function prov(){
@@ -251,6 +324,15 @@ const DATA = /*REPORT_DATA*/;
       : "";
   }
   const redraw=()=>{scorecard();draw();table();prov();};
+  // sortable columns: strings default ascending, numbers descending; re-click flips
+  document.querySelectorAll("th.sort").forEach(th=>{
+    th.addEventListener("click",()=>{
+      const k=th.dataset.k;
+      if(sortKey===k) sortDir=-sortDir;
+      else {sortKey=k; sortDir=(k==="owner"||k==="svc")?1:-1;}
+      table();
+    });
+  });
   redraw();
   new MutationObserver(redraw).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
   if(window.matchMedia)matchMedia("(prefers-color-scheme: dark)").addEventListener("change",redraw);
