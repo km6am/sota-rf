@@ -210,3 +210,10 @@ python3 sota_rf_sources.py --association W6 --radius 2000 --out-dir testout \
 ```
 
 More detail on architecture and design decisions is in [CLAUDE.md](CLAUDE.md).
+
+## License and data terms
+
+Code: MIT ([LICENSE](LICENSE)). The downloaded data and the outputs built from
+it keep their sources' terms. See [DATA_SOURCES.md](DATA_SOURCES.md) for credits
+and open items. Field strengths are model estimates, not measurements or an
+RF-exposure compliance assessment.
