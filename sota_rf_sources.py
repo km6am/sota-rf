@@ -993,6 +993,30 @@ def _vpat_gain(rc_amsl, summit_alt_m, distance_m, bays, spacing, near_floor=1000
     return max(field, VPAT_NULL_FILL) ** 2          # power gain (field²)
 
 
+def _freqs(r):
+    """A join row's frequencies (MHz), from its `;`-joined rf_freqs_mhz; blanks
+    and garbage dropped. Empty for a source with no frequency (TV ch>36)."""
+    fs = []
+    for tok in str(r.rf_freqs_mhz).split(";"):
+        try:
+            f = float(tok)
+        except ValueError:
+            continue
+        if not np.isnan(f):
+            fs.append(f)
+    return fs
+
+
+def _path_gain(r, base_radius=1000.0):
+    """The fraction of a join row's ERP that reaches its summit, beyond free
+    space: the FM vertical pattern (_vpat_gain) times the terrain diffraction
+    loss (terrain_loss_db, when apply_terrain() ran)."""
+    g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
+                     r.rf_bays, r.rf_spacing, near_floor=base_radius)
+    tl = getattr(r, "terrain_loss_db", 0.0) or 0.0
+    return g_v * 10.0 ** (-tl / 10.0)
+
+
 def _field_vm(sum_erp_over_d2):
     """Σ ERP/d² (W/m²-ish) -> estimated field strength E = √(30·Σ) in V/m."""
     return (30.0 * sum_erp_over_d2) ** 0.5
@@ -1066,20 +1090,10 @@ def _summit_analysis(joined, base_radius=1000.0):
                 continue
             w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
             # Vertical-pattern de-rate for off-beam far-field broadcast (near/co-sited
-            # sources keep full ERP — the guard lives in _vpat_gain).
-            g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
-                             r.rf_bays, r.rf_spacing, near_floor=base_radius)
-            tl = getattr(r, "terrain_loss_db", 0.0) or 0.0    # diffraction loss (dB)
-            contrib = w * g_v * (10.0 ** (-tl / 10.0)) * p / (max(r.distance_m, 10.0) ** 2)
+            # sources keep full ERP — the guard lives in _vpat_gain) and terrain.
+            contrib = w * _path_gain(r, base_radius) * p / (max(r.distance_m, 10.0) ** 2)
             field_sum += contrib
-            fs = []
-            for tok in str(r.rf_freqs_mhz).split(";"):
-                try:
-                    f = float(tok)
-                except ValueError:
-                    continue
-                if not np.isnan(f):
-                    fs.append(f)
+            fs = _freqs(r)
             # ham bands this source touches (once per source, not per frequency, so a
             # multi-channel licence can't inflate a band's field above the total)
             hit_ham = {hb for f in fs for hb, fc in HAM_BANDS if 0.5 * fc <= f <= 2 * fc}
@@ -1230,14 +1244,7 @@ def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None, xsec_cache=Non
     emitters = []
     for r in d.itertuples(index=False):
         p = None if pd.isna(r.rf_max_power_w) else float(r.rf_max_power_w)
-        fs = []
-        for tok in str(r.rf_freqs_mhz).split(";"):
-            try:
-                f = float(tok)
-            except ValueError:
-                continue
-            if not np.isnan(f):
-                fs.append(f)
+        fs = _freqs(r)
         if r.rf_source_db in ("FM", "TV", "AM"):
             n_bcast += 1
         elif fs and min(fs) >= 960:
@@ -1249,10 +1256,7 @@ def _report_data(d, meta, code, base_radius=1000.0, dem_dir=None, xsec_cache=Non
             # broadcast desense weight (see BROADCAST_HAM_WEIGHT) — applied to the
             # overload field only; the bars/scatter still show real (unweighted) ERP.
             w = BROADCAST_HAM_WEIGHT if r.rf_source_db in ("FM", "TV", "AM") else 1.0
-            g_v = _vpat_gain(r.rf_height_amsl_m, r.summit_alt_m, r.distance_m,
-                             r.rf_bays, r.rf_spacing, near_floor=base_radius)
-            tl = getattr(r, "terrain_loss_db", 0.0) or 0.0
-            g_v *= 10.0 ** (-tl / 10.0)                        # diffraction loss
+            g_v = _path_gain(r, base_radius)                   # pattern + diffraction
             field_sum += w * g_v * p / (dist * dist)
             for f in fs:
                 if 0.4 < f <= 1000:
