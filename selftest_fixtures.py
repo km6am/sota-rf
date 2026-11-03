@@ -191,3 +191,23 @@ assert abs(m._vpat_gain(443, 283, 1904, 6, 0.5, near_floor=1000.0) - 0.81) < 0.0
 # far + steep off-beam is de-rated but floored by null-fill (never below ~0.15^2)
 assert m._vpat_gain(700, 300, 1200, 6, 1.0, near_floor=1000.0) >= m.VPAT_NULL_FILL**2 - 1e-9
 print("vertical-pattern self-check OK: near-field guard / far de-rate / null-fill floor")
+
+# --- scene export (scene_rows) ------------------------------------------------
+# 1 kW at 1 km on 100 MHz, free space, 0 dBi: 60 dBm - 72.45 dB = -12.45 dBm.
+# A licence with two frequencies shares its ERP (split, -3.01 dB each) or puts
+# all of it on each (each); a microwave path (no power) is skipped, not placed.
+import pandas as _pd
+_row = dict(summit="T/T-001", rf_source_db="ULS", rf_ref="1", rf_owner="TEST", rf_services="PW",
+            distance_m=1000.0, rf_height_amsl_m=float("nan"), summit_alt_m=float("nan"),
+            rf_bays=float("nan"), rf_spacing=float("nan"))
+_d = _pd.DataFrame([dict(_row, rf_freqs_mhz="100.0", rf_max_power_w=1000.0),
+                    dict(_row, rf_freqs_mhz="100.0;100.2", rf_max_power_w=1000.0),
+                    dict(_row, rf_freqs_mhz="6034.15", rf_max_power_w=float("nan"))])
+_split, _sk = m.scene_rows(_d.iloc[:1])
+assert len(_split) == 1 and abs(_split[0]["dbm"] - (-12.45)) < 0.005, _split
+_split, _sk = m.scene_rows(_d)
+assert _sk == {"no power": 1, "no frequency": 0}, _sk
+assert [round(e["dbm"], 2) for e in _split if e["split_n"] == 2][:1] == [-15.46], _split
+_each, _ = m.scene_rows(_d, power="each")
+assert sorted(e["dbm"] for e in _each)[-1] == -12.45 and len(_each) == 3, _each
+print("scene self-check OK: free-space level, ERP split over a licence's frequencies, microwave skipped")

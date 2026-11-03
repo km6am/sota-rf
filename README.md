@@ -55,7 +55,9 @@ Useful flags: `--radius` (base radius, metres), `--no-uls` (structures only),
 `--data-dir`), `--broadcast-dir`, `--out-dir`,
 `--report W6/CC-072` (write one summit's report card), `--reports-dir DIR`
 (batch: a report card per impacted summit into `DIR/reports/` + a compact
-`DIR/qrm_index.json` for a host page to merge in).
+`DIR/qrm_index.json` for a host page to merge in), `--scene W6/CC-072` (write
+one summit's emitters as levels at the receiver, for the bench), with
+`--scene-power split|each`.
 
 ## Data & updates
 
@@ -148,6 +150,19 @@ Files prefixed by the association (or `US`):
   emitter as a dot + per-ham-band overload markers) and a scrollable table of all
   sources. This is the browser deep-dive companion CalTopo can't host; open it in
   any browser. Rendered from `report_template.html`.
+- **`<CODE>_scene.csv`** *(only with `--scene`)*: one summit's emitters as dBm at
+  the receiver, one row per frequency. Its `freq_mhz, dbm, label, dev_hz` columns
+  are what hp8935_sinad_serial's `esgbench.py scene --from` reads (`dev_hz` is
+  75 kHz on broadcast FM, blank elsewhere), and rfbench's V.4 checks the scene it
+  plays against it. Levels come from the same model the risk tiers use: ERP × the
+  FM vertical pattern × terrain diffraction, over free space at the horizontal
+  distance. A licence's one maximum ERP is shared equally among its frequencies
+  (`split`, the default, so a source counts once, as in the field), or put in
+  full on each (`each`, every channel keyed at once). FCC data says nothing about
+  which; it is an assumption either way. Sources with no power (microwave paths)
+  or no frequency (UHF TV above ch 36) are counted in the `#` header, not placed.
+  The raw `_rf_sources.csv` is not a scene: three quarters of its rows list
+  several `;`-joined frequencies, which the scene reader cannot split.
 
 CalTopo popups are plain text (no HTML/images/links), so the analysis rides in the
 feature's `title` (the SOTA code) + `description`, and severity in `marker-color`;

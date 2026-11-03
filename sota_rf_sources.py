@@ -1390,6 +1390,94 @@ def write_report_card(joined, summits, code, out_path, base_radius=1000.0,
     return out
 
 
+# ---------------------------------------------------------------------------
+# Scene export: a summit's emitters as levels at the receiver, for the bench
+# (hp8935_sinad_serial gpib/scene.py, `esgbench.py scene --from`; rfbench V.4).
+# ---------------------------------------------------------------------------
+C_LIGHT = 299792458.0
+SCENE_COLS = ["freq_mhz", "dbm", "label", "dev_hz", "summit", "source_db", "ref", "owner",
+              "services", "distance_m", "erp_w", "split_n", "path_gain_db", "far"]
+SCENE_FM_DEV_HZ = 75000.0       # broadcast FM's peak deviation; every other source is a bare carrier
+
+
+def scene_rows(d, base_radius=1000.0, power="split", rx_gain_dbi=0.0):
+    """One summit's join rows as emitters at the receiver: one per frequency,
+    dBm into a `rx_gain_dbi` antenna on the summit.
+
+    The level is sota-rf's own field model, not a new one: ERP x the FM
+    vertical pattern x terrain diffraction (_path_gain) over free space at
+    the horizontal distance, ERP treated as EIRP (as _field_vm does), so the
+    scene's total matches the field the risk tiers come from.
+
+    `power`: a licence lists several frequencies against one maximum ERP.
+    "split" (default) shares it equally among them, so a source counts once,
+    as the field model counts it. "each" puts the full ERP on every
+    frequency: the worst case, every channel keyed at once, N times hotter.
+    ASSUMED either way: FCC records say nothing about simultaneity.
+
+    Returns (rows, skipped) where skipped counts sources with no power
+    (microwave paths) and powered sources with no frequency (UHF TV ch>36)."""
+    if power not in ("split", "each"):
+        raise ValueError(f"power must be split or each, not {power!r}")
+    out, skipped = [], {"no power": 0, "no frequency": 0}
+    for r in d.itertuples(index=False):
+        if pd.isna(r.rf_max_power_w) or r.rf_max_power_w <= 0:
+            skipped["no power"] += 1
+            continue
+        fs = _freqs(r)
+        if not fs:
+            skipped["no frequency"] += 1
+            continue
+        g = _path_gain(r, base_radius)
+        n = len(fs) if power == "split" else 1
+        erp = float(r.rf_max_power_w) / n
+        dist = max(float(r.distance_m), 10.0)
+        for f in fs:
+            fspl = 20 * math.log10(4 * math.pi * dist * f * 1e6 / C_LIGHT)
+            out.append(dict(
+                freq_mhz=round(f, 6),
+                dbm=round(10 * math.log10(erp * g * 1000.0) - fspl + rx_gain_dbi, 2),
+                label=f"{r.rf_source_db} {str(r.rf_owner)[:32]}".strip(),
+                dev_hz=SCENE_FM_DEV_HZ if r.rf_source_db == "FM" else "",
+                summit=r.summit, source_db=r.rf_source_db, ref=r.rf_ref,
+                owner=str(r.rf_owner), services=r.rf_services,
+                distance_m=round(float(r.distance_m), 1), erp_w=round(erp, 3),
+                split_n=len(fs) if power == "split" else 1,
+                path_gain_db=round(10 * math.log10(g), 2) if g > 0 else -300.0,
+                far=bool(r.distance_m > base_radius)))
+    out.sort(key=lambda e: e["freq_mhz"])
+    return out, skipped
+
+
+def write_scene(joined, code, out_path, base_radius=1000.0, power="split", rx_gain_dbi=0.0,
+                provenance=None):
+    """Write `code`'s scene CSV: freq_mhz + dbm + label + dev_hz (what
+    esgbench.py scene --from reads), then where each level came from.
+    `#` lines are a header the readers skip."""
+    d = joined[joined["summit"] == code]
+    if d.empty:
+        raise ValueError(f"no in-range sources for summit {code!r}")
+    rows, skipped = scene_rows(d, base_radius, power, rx_gain_dbi)
+    if not rows:
+        raise ValueError(f"no source at {code} has both a frequency and a power")
+    tot = 10 * math.log10(sum(10 ** (e["dbm"] / 10.0) for e in rows))
+    with open(out_path, "w", newline="") as f:
+        f.write(f"# sota-rf scene: {code}, {len(rows)} emitter(s) from {len(d)} source(s); "
+                f"total {tot:+.1f} dBm into {rx_gain_dbi:g} dBi\n")
+        f.write(f"# level = ERP x FM vertical pattern x terrain diffraction over free space "
+                f"(sota-rf's field model); power={power}"
+                + (" (a licence's ERP shared equally among its frequencies)" if power == "split"
+                   else " (full ERP on every frequency: all channels keyed at once)") + "\n")
+        f.write(f"# skipped: {skipped['no power']} source(s) with no power (microwave paths), "
+                f"{skipped['no frequency']} with power but no frequency (UHF TV ch>36)\n")
+        if provenance:
+            f.write("# data as of: " + "; ".join(f"{l} {v}" for l, v in provenance) + "\n")
+        w = csv.DictWriter(f, fieldnames=SCENE_COLS)
+        w.writeheader()
+        w.writerows(rows)
+    return out_path, len(rows), skipped
+
+
 def _qrm(data):
     """Level-grouped QRM summary from a report's ham data:
     'High: 2m, 70cm · Moderate: 6m' + structured {high:[...], moderate:[...]}."""
@@ -1466,6 +1554,13 @@ def main():
     ap.add_argument("--report", metavar="SUMMIT",
                     help="also write a standalone HTML report card for this summit "
                          "code (e.g. W6/CC-072) to the output dir")
+    ap.add_argument("--scene", metavar="SUMMIT",
+                    help="also write this summit's emitters as levels at the receiver "
+                         "(<SUMMIT>_scene.csv: freq_mhz, dbm, label, dev_hz), the CSV "
+                         "esgbench.py scene --from and rfbench V.4 read")
+    ap.add_argument("--scene-power", choices=["split", "each"], default="split",
+                    help="a licence's ERP over its several frequencies: shared equally "
+                         "(split, default; matches the field model) or full on each (each)")
     ap.add_argument("--reports-dir", metavar="DIR",
                     help="batch: write a report card per impacted summit into "
                          "DIR/reports/ plus DIR/qrm_index.json (for hosting)")
@@ -1596,6 +1691,18 @@ def main():
         except ValueError as e:
             log(f"  report: {e}")
 
+    p_scene = None
+    if args.scene:
+        try:
+            p_scene, n_em, sk = write_scene(
+                joined, args.scene,
+                os.path.join(args.out_dir, args.scene.replace("/", "_") + "_scene.csv"),
+                args.radius, power=args.scene_power, provenance=prov)
+            log(f"  scene: {n_em} emitter(s) for {args.scene} (skipped {sk['no power']} "
+                f"without power, {sk['no frequency']} without frequency)")
+        except ValueError as e:
+            log(f"  scene: {e}")
+
     n_bundle = 0
     if args.reports_dir and len(joined):
         n_bundle = write_report_bundle(joined, summits, args.reports_dir, args.radius, prov,
@@ -1666,6 +1773,8 @@ def main():
     log(f"  {p_ct_src}  ({n_ct_src} source points, CalTopo)")
     if p_report:
         log(f"  {p_report}  (report card for {args.report})")
+    if p_scene:
+        log(f"  {p_scene}  (scene for {args.scene})")
 
 
 if __name__ == "__main__":

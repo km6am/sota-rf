@@ -200,6 +200,19 @@ the end), but the indices above are verified against the real files.
   per licence. Powered-but-unbinnable ERP (TV ch>36, blank freq) → `unknown
   freq` line.
 
+- **Scene export (for the bench) — built, self-tested.** `scene_rows()` /
+  `write_scene()` + `--scene <SUMMIT>` [`--scene-power split|each`] write
+  `<CODE>_scene.csv`: one row per frequency, `freq_mhz, dbm, label, dev_hz` (what
+  hp8935_sinad_serial's `esgbench.py scene --from` reads via its dbm path; rfbench
+  V.4 checks the played scene against it) plus provenance columns. Levels = ERP ×
+  `_path_gain` (FM pattern × terrain) over free space at horizontal distance, ERP
+  as EIRP (same as `_field_vm`). A licence's max ERP is **split** equally over its
+  frequencies by default (a source counts once, as in the field) — an assumption;
+  `each` is the all-channels-keyed worst case. Built because the raw
+  `_rf_sources.csv` is unreadable by the scene tool: its columns are `rf_*`
+  (esgbench defaults to `freq_mhz`/`max_power_w`/`owner` → 0 of 7466 W6 rows), and
+  ~74% of rows carry `;`-joined frequencies, which it silently skips.
+
 ## Data sources beyond FCC
 - **NOAA Weather Radio (NWR) — DONE.** Federal (NWS/NTIA), so absent from all FCC
   data — a 162.400–162.550 MHz blind spot beside 2 m. `load_noaa()` parses the
